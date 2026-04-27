@@ -130,6 +130,15 @@ export default function HomepageManagementPage() {
   const [savingSettings, setSavingSettings] = useState(false)
 
   // Fetch functions
+  useEffect(() => {
+    fetchBanners()
+    fetchStories()
+    fetchReels()
+    fetchPromotions()
+    fetchSettings()
+    fetchProducts()
+  }, [])
+
   const fetchProducts = async () => {
     try {
       const res = await fetch('/api/products?limit=100')
@@ -210,15 +219,6 @@ export default function HomepageManagementPage() {
       toast.error('Failed to fetch settings')
     }
   }
-
-  useEffect(() => {
-    fetchBanners()
-    fetchStories()
-    fetchReels()
-    fetchPromotions()
-    fetchSettings()
-    fetchProducts()
-  }, [])
 
   // Banner handlers
   const handleSaveBanner = async () => {

@@ -1,56 +1,17 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { createOrderSchema } from '@/lib/validations';
-import { getEnv } from '@/lib/cloudflare';
-import { OrderRepository } from '@/db/order.repository';
-import { ProductRepository } from '@/db/product.repository';
-import { queryFirst, queryAll, execute, stringifyJSON, numberToBool, boolToNumber } from '@/db/db';
-import { csrfMiddleware } from '@/lib/csrf';
-import { sanitizeAddressData, sanitizeForDB, sanitizeEmail, sanitizePhone, sanitizeProductData } from '@/lib/sanitize';
-import { invalidateCache } from '@/lib/cache';
+import { NextRequest, NextResponse } from 'next/server'
+import { db } from '@/lib/db'
+import { OrderStatus, PaymentStatus, AlertType } from '@prisma/client'
+import { createOrderSchema } from '@/lib/validations'
 
 // Allowed payment methods - Only Cash on Delivery is enabled
-const ALLOWED_PAYMENT_METHODS = ['CASH_ON_DELIVERY'] as const;
-
-// Edge Runtime export for Cloudflare
-export const runtime = 'edge';
+const ALLOWED_PAYMENT_METHODS = ['CASH_ON_DELIVERY'] as const
 
 export async function POST(request: NextRequest) {
-  // Get D1 database from request context (Cloudflare Pages/Workers)
-  const env = getEnv(request);
-
-  // Check CSRF protection
-  const csrfError = await csrfMiddleware(request, env);
-  if (csrfError) {
-    return csrfError;
-  }
-
   try {
-    const body = await request.json();
-
-    // Sanitize input data
-    const sanitized = {
-      ...body,
-      customerName: sanitizeForDB(body.customerName),
-      customerEmail: sanitizeEmail(body.customerEmail),
-      customerPhone: sanitizePhone(body.customerPhone),
-      shippingAddress: sanitizeAddressData(body.shippingAddress),
-      billingAddress: body.billingAddress ? sanitizeAddressData(body.billingAddress) : undefined,
-      orderItems: body.orderItems?.map((item: any) => ({
-        productId: item.productId,
-        productName: sanitizeForDB(item.productName),
-        productImage: item.productImage,
-        price: parseFloat(item.price) || 0,
-        quantity: parseInt(item.quantity) || 1,
-        variantId: item.variantId,
-        variantSku: item.variantSku ? sanitizeForDB(item.variantSku) : undefined,
-        variantSize: item.variantSize ? sanitizeForDB(item.variantSize) : undefined,
-        variantColor: item.variantColor ? sanitizeForDB(item.variantColor) : undefined,
-        variantMaterial: item.variantMaterial ? sanitizeForDB(item.variantMaterial) : undefined,
-      })) || [],
-    };
+    const body = await request.json()
 
     // Validate using Zod schema
-    const validation = createOrderSchema.safeParse(sanitized);
+    const validation = createOrderSchema.safeParse(body)
     if (!validation.success) {
       return NextResponse.json(
         {
@@ -58,10 +19,10 @@ export async function POST(request: NextRequest) {
           error: validation.error.errors[0].message,
         },
         { status: 400 }
-      );
+      )
     }
 
-    const validatedData = validation.data;
+    const validatedData = validation.data
 
     // Ensure only COD payment method is accepted
     if (validatedData.paymentMethod && !ALLOWED_PAYMENT_METHODS.includes(validatedData.paymentMethod as any)) {
@@ -72,19 +33,18 @@ export async function POST(request: NextRequest) {
           allowedMethods: ALLOWED_PAYMENT_METHODS,
         },
         { status: 400 }
-      );
+      )
     }
 
     // Check stock availability for all products/variants
-    const outOfStockItems: string[] = [];
+    const outOfStockItems: string[] = []
     for (const item of validatedData.orderItems) {
       if (item.variantId) {
         // Check variant-level stock
-        const variant = await queryFirst(
-          env,
-          'SELECT id, sku, stock, isActive, lowStockAlert, reorderLevel, reorderQty FROM product_variants WHERE id = ? LIMIT 1',
-          item.variantId
-        );
+        const variant = await db.productVariant.findUnique({
+          where: { id: item.variantId },
+          select: { id: true, sku: true, stock: true, isActive: true },
+        })
 
         if (!variant) {
           return NextResponse.json(
@@ -93,29 +53,28 @@ export async function POST(request: NextRequest) {
               error: `Variant ${item.variantSku || item.variantId} not found`,
             },
             { status: 404 }
-          );
+          )
         }
 
-        if (!numberToBool(variant.isActive as number)) {
+        if (!variant.isActive) {
           return NextResponse.json(
             {
               success: false,
               error: `Variant ${item.variantSku} is not available`,
             },
             { status: 400 }
-          );
+          )
         }
 
         if (variant.stock < item.quantity) {
-          outOfStockItems.push(`${item.productName} (${item.variantSku || item.variantSize || item.variantColor})`);
+          outOfStockItems.push(`${item.productName} (${item.variantSku || item.variantSize || item.variantColor})`)
         }
       } else {
         // Check product-level stock (backward compatibility)
-        const product = await queryFirst(
-          env,
-          'SELECT id, name, stock, isActive, lowStockAlert, reorderLevel, reorderQty FROM products WHERE id = ? LIMIT 1',
-          item.productId
-        );
+        const product = await db.product.findUnique({
+          where: { id: item.productId },
+          select: { id: true, name: true, stock: true, isActive: true },
+        })
 
         if (!product) {
           return NextResponse.json(
@@ -124,21 +83,21 @@ export async function POST(request: NextRequest) {
               error: `Product ${item.productId} not found`,
             },
             { status: 404 }
-          );
+          )
         }
 
-        if (!numberToBool(product.isActive as number)) {
+        if (!product.isActive) {
           return NextResponse.json(
             {
               success: false,
               error: `Product ${product.name} is not available`,
             },
             { status: 400 }
-          );
+          )
         }
 
         if (product.stock < item.quantity) {
-          outOfStockItems.push(product.name as string);
+          outOfStockItems.push(product.name)
         }
       }
     }
@@ -150,292 +109,274 @@ export async function POST(request: NextRequest) {
           error: `Insufficient stock for: ${outOfStockItems.join(', ')}`,
         },
         { status: 400 }
-      );
+      )
     }
+
+    // Generate unique order number and tracking number
+    const orderNumber = `ORD-${Date.now().toString().slice(-6)}`
+    const trackingNumber = `PK-${Math.random().toString(36).substring(2, 10).toUpperCase()}`
 
     // Calculate totals
-    const subtotal = validatedData.subtotal;
-    const shipping = validatedData.shipping;
-    const tax = validatedData.tax;
-    const discount = validatedData.discount || 0;
-    const total = validatedData.total;
+    const subtotal = validatedData.subtotal
+    const shipping = validatedData.shipping
+    const tax = validatedData.tax
+    const discount = validatedData.discount || 0
+    const total = validatedData.total
 
     // Create order with Cash on Delivery as the only payment method
-    const order = await OrderRepository.create(env, {
-      userId: validatedData.userId || undefined,
-      customerName: validatedData.customerName,
-      customerEmail: validatedData.customerEmail,
-      customerPhone: validatedData.customerPhone || undefined,
-      shippingAddress: stringifyJSON(validatedData.shippingAddress),
-      billingAddress: validatedData.billingAddress
-        ? stringifyJSON(validatedData.billingAddress)
-        : stringifyJSON(validatedData.shippingAddress),
-      subtotal: parseFloat(subtotal.toFixed(2)),
-      shipping: parseFloat(shipping.toFixed(2)),
-      tax: parseFloat(tax.toFixed(2)),
-      discount: parseFloat(discount.toFixed(2)),
-      total: parseFloat(total.toFixed(2)),
-      paymentMethod: 'CASH_ON_DELIVERY',
-    });
-
-    // Create order items
-    for (const item of validatedData.orderItems) {
-      await OrderRepository.addItem(env, {
-        orderId: order.id,
-        productId: item.productId,
-        variantId: item.variantId,
-        quantity: item.quantity,
-        price: parseFloat(item.price.toFixed(2)),
-        productName: item.productName,
-        productImage: item.productImage,
-        variantSku: item.variantSku,
-        variantSize: item.variantSize,
-        variantColor: item.variantColor,
-        variantMaterial: item.variantMaterial,
-      });
-    }
+    const order = await db.order.create({
+      data: {
+        orderNumber,
+        trackingNumber,
+        userId: validatedData.userId || null,
+        customerName: validatedData.customerName,
+        customerEmail: validatedData.customerEmail,
+        customerPhone: validatedData.customerPhone || null,
+        shippingAddress: JSON.stringify(validatedData.shippingAddress),
+        billingAddress: validatedData.billingAddress
+          ? JSON.stringify(validatedData.billingAddress)
+          : JSON.stringify(validatedData.shippingAddress),
+        subtotal: parseFloat(subtotal.toFixed(2)),
+        shipping: parseFloat(shipping.toFixed(2)),
+        tax: parseFloat(tax.toFixed(2)),
+        discount: parseFloat(discount.toFixed(2)),
+        total: parseFloat(total.toFixed(2)),
+        status: OrderStatus.PENDING,
+        trackingStatus: 'PENDING',
+        paymentStatus: PaymentStatus.PENDING,
+        paymentMethod: 'CASH_ON_DELIVERY', // Only COD is supported
+        notes: validatedData.notes || null,
+        orderItems: {
+          create: validatedData.orderItems.map((item) => ({
+            productId: item.productId,
+            quantity: item.quantity,
+            price: parseFloat(item.price.toFixed(2)),
+            productName: item.productName,
+            productImage: item.productImage,
+            // Include variant information if provided
+            ...(item.variantId && {
+              variantId: item.variantId,
+              variantSku: item.variantSku,
+              variantSize: item.variantSize,
+              variantColor: item.variantColor,
+              variantMaterial: item.variantMaterial,
+            }),
+          })),
+        },
+      },
+      include: {
+        user: true,
+        orderItems: true,
+      },
+    })
 
     // Update product/variant stock and generate alerts
     for (const item of validatedData.orderItems) {
-      const quantity = item.quantity;
+      const quantity = item.quantity
 
       if (item.variantId) {
         // Update variant-level inventory
-        const variant = await queryFirst(
-          env,
-          'SELECT id, stock, lowStockAlert, reorderLevel, reorderQty FROM product_variants WHERE id = ? LIMIT 1',
-          item.variantId
-        );
+        const variant = await db.productVariant.findUnique({
+          where: { id: item.variantId },
+          select: {
+            id: true,
+            stock: true,
+            lowStockAlert: true,
+            reorderLevel: true,
+            reorderQty: true,
+          },
+        })
 
-        if (!variant) continue;
+        if (!variant) continue
 
         // Update variant stock
-        const newStock = variant.stock - quantity;
-        await execute(
-          env,
-          'UPDATE product_variants SET stock = ? WHERE id = ?',
-          newStock,
-          item.variantId
-        );
+        const newStock = variant.stock - quantity
+        await db.productVariant.update({
+          where: { id: item.variantId },
+          data: { stock: newStock },
+        })
 
         // Generate variant-specific alerts
         if (newStock === 0) {
-          await execute(
-            env,
-            'INSERT INTO inventory_alerts (id, variantId, alertType, quantity, isRead, isResolved, createdAt) VALUES (?, ?, ?, ?, 0, 0, ?)',
-            `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-            item.variantId,
-            'OUT_OF_STOCK',
-            0,
-            new Date().toISOString()
-          );
+          await db.inventoryAlert.create({
+            data: {
+              variantId: item.variantId,
+              alertType: AlertType.OUT_OF_STOCK,
+              quantity: 0,
+            },
+          })
         } else if (newStock < variant.reorderLevel) {
           // Check if REORDER_NEEDED alert already exists and is not resolved
-          const existingAlert = await queryFirst(
-            env,
-            'SELECT id FROM inventory_alerts WHERE variantId = ? AND alertType = ? AND isResolved = 0 LIMIT 1',
-            item.variantId,
-            'REORDER_NEEDED'
-          );
+          const existingAlert = await db.inventoryAlert.findFirst({
+            where: {
+              variantId: item.variantId,
+              alertType: AlertType.REORDER_NEEDED,
+              isResolved: false,
+            },
+          })
 
           if (!existingAlert) {
-            await execute(
-              env,
-              'INSERT INTO inventory_alerts (id, variantId, alertType, quantity, isRead, isResolved, createdAt) VALUES (?, ?, ?, ?, 0, 0, ?)',
-              `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              item.variantId,
-              'REORDER_NEEDED',
-              newStock,
-              new Date().toISOString()
-            );
+            await db.inventoryAlert.create({
+              data: {
+                variantId: item.variantId,
+                alertType: AlertType.REORDER_NEEDED,
+                quantity: newStock,
+              },
+            })
           }
         } else if (newStock < variant.lowStockAlert) {
           // Check if LOW_STOCK alert already exists and is not resolved
-          const existingAlert = await queryFirst(
-            env,
-            'SELECT id FROM inventory_alerts WHERE variantId = ? AND alertType = ? AND isResolved = 0 LIMIT 1',
-            item.variantId,
-            'LOW_STOCK'
-          );
+          const existingAlert = await db.inventoryAlert.findFirst({
+            where: {
+              variantId: item.variantId,
+              alertType: AlertType.LOW_STOCK,
+              isResolved: false,
+            },
+          })
 
           if (!existingAlert) {
-            await execute(
-              env,
-              'INSERT INTO inventory_alerts (id, variantId, alertType, quantity, isRead, isResolved, createdAt) VALUES (?, ?, ?, ?, 0, 0, ?)',
-              `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              item.variantId,
-              'LOW_STOCK',
-              newStock,
-              new Date().toISOString()
-            );
+            await db.inventoryAlert.create({
+              data: {
+                variantId: item.variantId,
+                alertType: AlertType.LOW_STOCK,
+                quantity: newStock,
+              },
+            })
           }
         }
       } else {
         // Update product-level inventory (backward compatibility)
-        const product = await queryFirst(
-          env,
-          'SELECT id, stock, lowStockAlert, reorderLevel, reorderQty FROM products WHERE id = ? LIMIT 1',
-          item.productId
-        );
+        const product = await db.product.findUnique({
+          where: { id: item.productId },
+          select: {
+            id: true,
+            name: true,
+            stock: true,
+            lowStockAlert: true,
+            reorderLevel: true,
+            reorderQty: true,
+          },
+        })
 
-        if (!product) continue;
+        if (!product) continue
 
         // Update stock
-        const newStock = product.stock - quantity;
-        await execute(
-          env,
-          'UPDATE products SET stock = ? WHERE id = ?',
-          newStock,
-          item.productId
-        );
+        const newStock = product.stock - quantity
+        await db.product.update({
+          where: { id: item.productId },
+          data: { stock: newStock },
+        })
 
         // Generate inventory alerts based on new stock level
         if (newStock === 0) {
-          await execute(
-            env,
-            'INSERT INTO inventory_alerts (id, productId, alertType, quantity, isRead, isResolved, createdAt) VALUES (?, ?, ?, ?, 0, 0, ?)',
-            `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-            item.productId,
-            'OUT_OF_STOCK',
-            0,
-            new Date().toISOString()
-          );
+          await db.inventoryAlert.create({
+            data: {
+              productId: item.productId,
+              alertType: AlertType.OUT_OF_STOCK,
+              quantity: 0,
+            },
+          })
         } else if (newStock < product.reorderLevel) {
           // Check if REORDER_NEEDED alert already exists and is not resolved
-          const existingAlert = await queryFirst(
-            env,
-            'SELECT id FROM inventory_alerts WHERE productId = ? AND alertType = ? AND isResolved = 0 LIMIT 1',
-            item.productId,
-            'REORDER_NEEDED'
-          );
+          const existingAlert = await db.inventoryAlert.findFirst({
+            where: {
+              productId: item.productId,
+              alertType: AlertType.REORDER_NEEDED,
+              isResolved: false,
+            },
+          })
 
           if (!existingAlert) {
-            await execute(
-              env,
-              'INSERT INTO inventory_alerts (id, productId, alertType, quantity, isRead, isResolved, createdAt) VALUES (?, ?, ?, ?, 0, 0, ?)',
-              `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              item.productId,
-              'REORDER_NEEDED',
-              newStock,
-              new Date().toISOString()
-            );
+            await db.inventoryAlert.create({
+              data: {
+                productId: item.productId,
+                alertType: AlertType.REORDER_NEEDED,
+                quantity: newStock,
+              },
+            })
           }
         } else if (newStock < product.lowStockAlert) {
           // Check if LOW_STOCK alert already exists and is not resolved
-          const existingAlert = await queryFirst(
-            env,
-            'SELECT id FROM inventory_alerts WHERE productId = ? AND alertType = ? AND isResolved = 0 LIMIT 1',
-            item.productId,
-            'LOW_STOCK'
-          );
+          const existingAlert = await db.inventoryAlert.findFirst({
+            where: {
+              productId: item.productId,
+              alertType: AlertType.LOW_STOCK,
+              isResolved: false,
+            },
+          })
 
           if (!existingAlert) {
-            await execute(
-              env,
-              'INSERT INTO inventory_alerts (id, productId, alertType, quantity, isRead, isResolved, createdAt) VALUES (?, ?, ?, ?, 0, 0, ?)',
-              `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
-              item.productId,
-              'LOW_STOCK',
-              newStock,
-              new Date().toISOString()
-            );
+            await db.inventoryAlert.create({
+              data: {
+                productId: item.productId,
+                alertType: AlertType.LOW_STOCK,
+                quantity: newStock,
+              },
+            })
           }
         }
       }
     }
 
-    // Fetch order with items
-    const orderWithItems = await OrderRepository.findById(env, order.id);
-    const orderItems = await OrderRepository.getItems(env, order.id);
-
-    const transformedOrder = {
-      ...orderWithItems,
-      shippingAddress: orderWithItems?.shippingAddress ? JSON.parse(orderWithItems.shippingAddress) : null,
-      billingAddress: orderWithItems?.billingAddress ? JSON.parse(orderWithItems.billingAddress) : null,
-      orderItems,
-    };
-
-    // Invalidate user cart cache if user is logged in
-    if (validatedData.userId) {
-      await invalidateCache(env, 'user-cart', validatedData.userId);
-    }
-
     return NextResponse.json({
       success: true,
-      data: transformedOrder,
+      data: order,
       message: 'Order created successfully',
-    });
+    })
   } catch (error) {
-    console.error('Error creating order:', error);
+    console.error('Error creating order:', error)
     return NextResponse.json(
       {
         success: false,
         error: 'Failed to create order',
       },
       { status: 500 }
-    );
+    )
   }
 }
 
 export async function GET(request: NextRequest) {
-  // Get D1 database from request context (Cloudflare Pages/Workers)
-  const env = getEnv(request);
-
   try {
-    const searchParams = request.nextUrl.searchParams;
-    const userId = searchParams.get('userId');
-    const email = searchParams.get('email');
-    const orderNumber = searchParams.get('orderNumber');
+    const searchParams = request.nextUrl.searchParams
+    const userId = searchParams.get('userId')
+    const email = searchParams.get('email')
+    const orderNumber = searchParams.get('orderNumber')
 
-    // Build WHERE clause
-    const conditions: string[] = [];
-    const params: unknown[] = [];
+    // Build where clause
+    const where: any = {}
 
     if (userId) {
-      conditions.push('userId = ?');
-      params.push(userId);
+      where.userId = userId
     } else if (email) {
-      conditions.push('customerEmail = ?');
-      params.push(email);
+      where.customerEmail = email
     } else if (orderNumber) {
-      conditions.push('orderNumber = ?');
-      params.push(orderNumber);
+      where.orderNumber = orderNumber
     }
 
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-
     // Fetch orders
-    const { queryAll } = await import('@/db/db');
-    const orders = await queryAll(
-      env,
-      `SELECT * FROM orders ${whereClause} ORDER BY createdAt DESC`,
-      ...params
-    );
-
-    // Fetch order items for each order
-    const ordersWithItems = await Promise.all(orders.map(async (order: any) => {
-      const orderItems = await OrderRepository.getItems(env, order.id);
-      return {
-        ...order,
-        shippingAddress: order.shippingAddress ? JSON.parse(order.shippingAddress) : null,
-        billingAddress: order.billingAddress ? JSON.parse(order.billingAddress) : null,
-        orderItems,
-      };
-    }));
+    const orders = await db.order.findMany({
+      where,
+      include: {
+        orderItems: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    })
 
     return NextResponse.json({
       success: true,
-      data: ordersWithItems,
-      total: ordersWithItems.length,
-    });
+      data: orders,
+      total: orders.length,
+    })
   } catch (error) {
-    console.error('Error fetching orders:', error);
+    console.error('Error fetching orders:', error)
     return NextResponse.json(
       {
         success: false,
         error: 'Failed to fetch orders',
       },
       { status: 500 }
-    );
+    )
   }
 }

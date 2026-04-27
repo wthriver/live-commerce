@@ -1,149 +1,118 @@
-import { NextResponse } from 'next/server';
-import { searchProductsSchema } from '@/lib/validations';
-import { getEnv } from '@/lib/cloudflare';
-import { ProductRepository } from '@/db/product.repository';
-import { CategoryRepository } from '@/db/category.repository';
-import { numberToBool, parseJSON, count } from '@/db/db';
-import { addCacheHeaders, CachePresets } from '@/lib/http-cache';
-
-// Edge Runtime export for Cloudflare
-export const runtime = 'edge';
+import { NextResponse } from 'next/server'
+import { db } from '@/lib/db'
+import { searchProductsSchema } from '@/lib/validations'
 
 export async function GET(request: Request) {
-  // Get D1 database from request context (Cloudflare Pages/Workers)
-  const env = getEnv(request);
-
   try {
-    const { searchParams } = new URL(request.url);
+    const { searchParams } = new URL(request.url)
 
     // Parse and validate query parameters
-    const queryParams: any = {};
+    const queryParams: any = {}
     for (const [key, value] of searchParams.entries()) {
       if (key === 'page' || key === 'limit' || key === 'minPrice' || key === 'maxPrice') {
-        queryParams[key] = value ? parseInt(value) : undefined;
+        queryParams[key] = value ? parseInt(value) : undefined
       } else if (key === 'sortBy' || key === 'sortOrder') {
-        queryParams[key] = value;
+        queryParams[key] = value
       } else {
-        queryParams[key] = value;
+        queryParams[key] = value
       }
     }
 
     // Validate using Zod schema
-    const validation = searchProductsSchema.safeParse(queryParams);
-    const validatedParams = validation.success ? validation.data : queryParams;
+    const validation = searchProductsSchema.safeParse(queryParams)
+    const validatedParams = validation.success ? validation.data : queryParams
 
-    const page = validatedParams.page || 1;
-    const limit = validatedParams.limit || 12;
-    const offset = (page - 1) * limit;
+    const page = validatedParams.page || 1
+    const limit = validatedParams.limit || 12
+    const skip = (page - 1) * limit
 
-    const type = searchParams.get('type') || 'all';
-    const categorySlug = searchParams.get('category');
-    const search = searchParams.get('search');
-    const sortBy = validatedParams.sortBy || 'createdAt';
-    const sortOrder = validatedParams.sortOrder || 'desc';
-    const minPrice = validatedParams.minPrice;
-    const maxPrice = validatedParams.maxPrice;
+    const type = searchParams.get('type') || 'all'
+    const categorySlug = searchParams.get('category')
+    const search = searchParams.get('search')
+    const sortBy = validatedParams.sortBy || 'createdAt'
+    const sortOrder = validatedParams.sortOrder || 'desc'
+    const minPrice = validatedParams.minPrice
+    const maxPrice = validatedParams.maxPrice
 
-    // Build WHERE clause conditions
-    const conditions: string[] = ['isActive = 1'];
-    const params: unknown[] = [];
+    // Build where clause
+    const where: any = {
+      isActive: true,
+    }
 
     // Filter by type
     if (type === 'featured') {
-      conditions.push('isFeatured = 1');
+      where.isFeatured = true
     } else if (type === 'sale') {
-      conditions.push('(discount IS NOT NULL AND discount > 0)');
+      where.discount = { gt: 0 }
     } else if (type === 'trending') {
-      conditions.push('isFeatured = 1');
+      where.isFeatured = true
+    } else if (type === 'new') {
+      // Newest products by createdAt
     }
-    // 'new' doesn't need a condition - we'll sort by createdAt desc
 
     // Filter by category
-    let category = null;
     if (categorySlug) {
-      category = await CategoryRepository.findBySlug(env, categorySlug);
-      if (category) {
-        conditions.push('categoryId = ?');
-        params.push(category.id);
-      } else {
-        // Category not found, return empty results
-        return NextResponse.json({
-          products: [],
-          pagination: {
-            page,
-            limit,
-            totalCount: 0,
-            totalPages: 0,
-            hasNextPage: false,
-            hasPrevPage: false,
-          },
-        });
+      where.category = {
+        slug: categorySlug,
       }
     }
 
     // Search by name
     if (search) {
-      conditions.push('(name LIKE ? OR description LIKE ?)');
-      params.push(`%${search}%`, `%${search}%`);
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+      ]
     }
 
     // Filter by price range
     if (minPrice !== undefined || maxPrice !== undefined) {
-      if (minPrice !== undefined && maxPrice !== undefined) {
-        conditions.push('basePrice >= ? AND basePrice <= ?');
-        params.push(minPrice, maxPrice);
-      } else if (minPrice !== undefined) {
-        conditions.push('basePrice >= ?');
-        params.push(minPrice);
-      } else if (maxPrice !== undefined) {
-        conditions.push('basePrice <= ?');
-        params.push(maxPrice);
+      where.price = {}
+      if (minPrice !== undefined) {
+        where.price.gte = minPrice
+      }
+      if (maxPrice !== undefined) {
+        where.price.lte = maxPrice
       }
     }
 
-    const whereClause = `WHERE ${conditions.join(' AND ')}`;
-
     // Get total count for pagination
-    const totalCount = await count(
-      env,
-      'products',
-      whereClause,
-      ...params
-    );
-
-    // Build ORDER BY clause
-    const validSortColumns = ['createdAt', 'name', 'basePrice', 'comparePrice'];
-    const validSortOrders = ['asc', 'desc'];
-    const sortColumn = validSortColumns.includes(sortBy) ? sortBy : 'createdAt';
-    const sortDirection = validSortOrders.includes(sortOrder) ? sortOrder : 'desc';
-    const orderByClause = `ORDER BY ${sortColumn} ${sortDirection.toUpperCase()}`;
+    const totalCount = await db.product.count({ where })
 
     // Fetch products from database with pagination
-    const { queryAll } = await import('@/db/db');
-    const products = await queryAll(
-      env,
-      `SELECT * FROM products ${whereClause} ${orderByClause} LIMIT ? OFFSET ?`,
-      ...params,
-      limit,
-      offset
-    );
+    const products = await db.product.findMany({
+      where,
+      skip,
+      take: limit,
+      include: {
+        category: true,
+      },
+      orderBy: {
+        [sortBy]: sortOrder,
+      },
+    })
+
+    // Calculate pagination metadata
+    const totalPages = Math.ceil(totalCount / limit)
+    const hasNextPage = page < totalPages
+    const hasPrevPage = page > 1
 
     // Transform products to match expected frontend format
-    const transformedProducts = products.map((product: any) => {
-      const images = parseJSON<string[]>(product.images) || [];
-      let attributes: any = {};
+    const transformedProducts = products.map(product => {
+      const images = product.images ? JSON.parse(product.images) : []
+      let attributes: any = {}
 
       // If product has variants, include that information
-      if (numberToBool(product.hasVariants)) {
-        attributes.hasVariants = true;
+      if (product.hasVariants) {
+        attributes.hasVariants = true
       }
 
       // Calculate badge based on discount
-      let badge: string | undefined;
+      let badge: string | undefined
       if (product.discount && product.discount > 0) {
-        badge = 'Sale';
-      } else if (numberToBool(product.isFeatured)) {
-        badge = 'New';
+        badge = 'Sale'
+      } else if (product.isFeatured) {
+        badge = 'New'
       }
 
       return {
@@ -151,32 +120,27 @@ export async function GET(request: Request) {
         name: product.name,
         slug: product.slug,
         description: product.description,
-        price: product.basePrice,
+        price: product.basePrice || product.price,
         originalPrice: product.comparePrice || undefined,
-        image: images[0] || category?.image || '',
+        image: images[0] || product.category?.image || '',
         images: images,
         rating: 4.5, // Default rating - in production, this would come from reviews
         reviews: Math.floor(Math.random() * 500) + 10, // Random review count - in production, this would be real
         badge,
-        category: category?.name,
-        categorySlug: category?.slug,
+        category: product.category?.name,
+        categorySlug: product.category?.slug,
         categoryId: product.categoryId,
         stock: product.stock,
-        hasVariants: numberToBool(product.hasVariants),
-        basePrice: product.basePrice,
+        hasVariants: product.hasVariants,
+        basePrice: product.basePrice || product.price,
         attributes,
-        isFeatured: numberToBool(product.isFeatured),
-        isActive: numberToBool(product.isActive),
+        isFeatured: product.isFeatured,
+        isActive: product.isActive,
         lowStockAlert: product.lowStockAlert,
-      };
-    });
+      }
+    })
 
-    // Calculate pagination metadata
-    const totalPages = Math.ceil(totalCount / limit);
-    const hasNextPage = page < totalPages;
-    const hasPrevPage = page > 1;
-
-    const response = NextResponse.json({
+    return NextResponse.json({
       products: transformedProducts,
       pagination: {
         page,
@@ -186,15 +150,12 @@ export async function GET(request: Request) {
         hasNextPage,
         hasPrevPage,
       },
-    });
-
-    // Add caching headers for products
-    return addCacheHeaders(response, CachePresets.STATIC);
+    })
   } catch (error) {
-    console.error('Error fetching products:', error);
+    console.error('Error fetching products:', error)
     return NextResponse.json(
       { error: 'Failed to fetch products' },
       { status: 500 }
-    );
+    )
   }
 }

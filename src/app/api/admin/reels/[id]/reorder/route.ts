@@ -1,15 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { ReelRepository } from '@/db/reel.repository'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function PUT(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const env = getEnv(request)
     const { id } = await params
     const body = await request.json()
     const { order } = body
@@ -24,8 +20,9 @@ export async function PUT(
       )
     }
 
-    const reel = await ReelRepository.update(env, id, {
-      orderNum: order
+    const reel = await db.reel.update({
+      where: { id },
+      data: { order }
     })
 
     return NextResponse.json({

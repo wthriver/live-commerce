@@ -3,8 +3,6 @@
  * Generates unique SKUs based on product category, name, and variant attributes
  */
 
-import { queryFirst, Env } from '@/db/db'
-
 /**
  * Generate SKU for a product variant
  * Format: CAT-PROD-SIZE-COLOR-RAND
@@ -90,21 +88,21 @@ export function validateSKU(sku: string): boolean {
 
 /**
  * Check if SKU conflicts with existing SKU in database
- * This should be called from backend only with env parameter
+ * This should be called from backend only
  */
 export async function checkSKUConflict(
-  env: Env,
   sku: string,
   excludeId?: string
 ): Promise<boolean> {
   try {
-    const sql = excludeId
-      ? 'SELECT id FROM product_variants WHERE sku = ? AND id != ? LIMIT 1'
-      : 'SELECT id FROM product_variants WHERE sku = ? LIMIT 1'
+    const { db } = await import('./db')
 
-    const params = excludeId ? [sku, excludeId] : [sku]
-
-    const existing = await queryFirst<{ id: string }>(env, sql, ...params)
+    const existing = await db.productVariant.findFirst({
+      where: {
+        sku,
+        id: excludeId ? { not: excludeId } : undefined,
+      },
+    })
 
     return !!existing
   } catch (error) {

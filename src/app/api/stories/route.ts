@@ -1,27 +1,32 @@
-import { NextResponse } from 'next/server';
-import { getEnv } from '@/lib/cloudflare';
-import { StoryRepository } from '@/db/story.repository';
+import { NextResponse } from 'next/server'
+import { db } from '@/lib/db'
 
-// Edge Runtime export for Cloudflare
-export const runtime = 'edge';
-
-export async function GET(request: Request) {
-  // Get D1 database from request context (Cloudflare Pages/Workers)
-  const env = getEnv(request);
-
+export async function GET() {
   try {
-    const stories = await StoryRepository.findAllActive(env);
+    const stories = await db.story.findMany({
+      where: { isActive: true },
+      orderBy: [
+        { order: 'asc' },
+        { createdAt: 'desc' }
+      ]
+    })
+
+    // Parse images JSON
+    const storiesWithParsedImages = stories.map(story => ({
+      ...story,
+      images: JSON.parse(story.images || '[]')
+    }))
 
     return NextResponse.json({
       success: true,
-      data: stories
-    });
+      data: storiesWithParsedImages
+    })
   } catch (error) {
-    console.error('Error fetching stories:', error);
+    console.error('Error fetching stories:', error)
     // Return empty array on error instead of failing
     return NextResponse.json({
       success: false,
       data: []
-    });
+    })
   }
 }

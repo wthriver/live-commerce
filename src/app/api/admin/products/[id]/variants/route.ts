@@ -1,12 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { ProductRepository } from '@/db/product.repository'
-import { CategoryRepository } from '@/db/category.repository'
+import { db } from '@/lib/db'
 import { generateSKU, checkSKUConflict } from '@/lib/sku-generator'
 import { z } from 'zod'
-import { queryFirst, queryAll, execute, boolToNumber, parseJSON, stringifyJSON, now } from '@/db/db'
-
-export const runtime = 'edge';
 
 /**
  * Schema for variant creation
@@ -36,11 +31,15 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const env = getEnv(request)
     const { id } = await params
 
     // Fetch product to check if it exists
-    const product = await ProductRepository.findById(env, id)
+    const product = await db.product.findUnique({
+      where: { id },
+      include: {
+        category: true,
+      },
+    })
 
     if (!product) {
       return NextResponse.json(
@@ -49,26 +48,17 @@ export async function GET(
       )
     }
 
-    // Fetch category for response
-    let category = null
-    if (product.categoryId) {
-      category = await CategoryRepository.findById(env, product.categoryId)
-    }
-
     // Fetch all variants for this product (including inactive)
-    const variants = await queryAll<any>(
-      env,
-      'SELECT * FROM product_variants WHERE productId = ? ORDER BY isDefault DESC, size ASC, color ASC',
-      id
-    )
-
-    // Parse images JSON field for each variant
-    const variantsWithImages = variants.map((v: any) => ({
-      ...v,
-      images: parseJSON<string[]>(v.images) || [],
-      isActive: typeof v.isActive === 'boolean' ? v.isActive : boolToNumber(v.isActive),
-      isDefault: typeof v.isDefault === 'boolean' ? v.isDefault : boolToNumber(v.isDefault),
-    }))
+    const variants = await db.productVariant.findMany({
+      where: {
+        productId: id,
+      },
+      orderBy: [
+        { isDefault: 'desc' },
+        { size: 'asc' },
+        { color: 'asc' },
+      ],
+    })
 
     return NextResponse.json({
       success: true,
@@ -77,16 +67,16 @@ export async function GET(
           id: product.id,
           name: product.name,
           slug: product.slug,
-          categorySlug: category?.slug || 'GEN',
+          categorySlug: product.category?.slug || 'GEN',
         },
-        variants: variantsWithImages.map((variant) => ({
+        variants: variants.map((variant) => ({
           id: variant.id,
           sku: variant.sku,
           name: variant.name,
           price: variant.price,
           comparePrice: variant.comparePrice,
           stock: variant.stock,
-          images: variant.images,
+          images: variant.images ? JSON.parse(variant.images) : null,
           size: variant.size,
           color: variant.color,
           material: variant.material,
@@ -121,23 +111,22 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const env = getEnv(request)
     const { id } = await params
 
     // Fetch product to check if it exists
-    const product = await ProductRepository.findById(env, id)
+    const product = await db.product.findUnique({
+      where: { id },
+      include: {
+        category: true,
+        variants: true,
+      },
+    })
 
     if (!product) {
       return NextResponse.json(
         { success: false, error: 'Product not found' },
         { status: 404 }
       )
-    }
-
-    // Fetch category for SKU generation
-    let category = null
-    if (product.categoryId) {
-      category = await CategoryRepository.findById(env, product.categoryId)
     }
 
     // Parse request body
@@ -148,7 +137,7 @@ export async function POST(
 
     // Generate SKU
     const sku = generateSKU(
-      category?.slug || 'GEN',
+      product.category?.slug || 'GEN',
       product.name,
       {
         size: validatedData.size,
@@ -158,7 +147,7 @@ export async function POST(
     )
 
     // Check for SKU conflicts
-    const hasConflict = await checkSKUConflict(env, sku)
+    const hasConflict = await checkSKUConflict(sku)
     if (hasConflict) {
       return NextResponse.json(
         { success: false, error: 'SKU already exists. Please try again.' },
@@ -168,35 +157,44 @@ export async function POST(
 
     // If this is set as default, remove default from other variants
     if (validatedData.isDefault) {
-      await execute(
-        env,
-        'UPDATE product_variants SET isDefault = 0 WHERE productId = ? AND isDefault = 1',
-        id
-      )
+      await db.productVariant.updateMany({
+        where: {
+          productId: id,
+          isDefault: true,
+        },
+        data: {
+          isDefault: false,
+        },
+      })
     }
 
     // Create variant
-    const variant = await ProductRepository.createVariant(env, {
-      productId: id,
-      sku,
-      name: validatedData.name,
-      price: validatedData.price,
-      comparePrice: validatedData.comparePrice,
-      stock: validatedData.stock,
-      images: validatedData.images,
-      size: validatedData.size,
-      color: validatedData.color,
-      material: validatedData.material,
-      isActive: validatedData.isActive,
-      isDefault: validatedData.isDefault,
-      lowStockAlert: validatedData.lowStockAlert,
-      reorderLevel: validatedData.reorderLevel,
-      reorderQty: validatedData.reorderQty,
+    const variant = await db.productVariant.create({
+      data: {
+        productId: id,
+        sku,
+        name: validatedData.name,
+        price: validatedData.price,
+        comparePrice: validatedData.comparePrice,
+        stock: validatedData.stock,
+        images: JSON.stringify(validatedData.images),
+        size: validatedData.size,
+        color: validatedData.color,
+        material: validatedData.material,
+        isDefault: validatedData.isDefault,
+        isActive: validatedData.isActive,
+        lowStockAlert: validatedData.lowStockAlert,
+        reorderLevel: validatedData.reorderLevel,
+        reorderQty: validatedData.reorderQty,
+      },
     })
 
     // Update product to indicate it has variants
     if (!product.hasVariants) {
-      await ProductRepository.update(env, id, { hasVariants: true })
+      await db.product.update({
+        where: { id },
+        data: { hasVariants: true },
+      })
     }
 
     return NextResponse.json({
@@ -208,7 +206,7 @@ export async function POST(
         price: variant.price,
         comparePrice: variant.comparePrice,
         stock: variant.stock,
-        images: variant.images,
+        images: variant.images ? JSON.parse(variant.images) : null,
         size: variant.size,
         color: variant.color,
         material: variant.material,

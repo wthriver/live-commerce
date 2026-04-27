@@ -212,6 +212,11 @@ function OrderConfirmationContent() {
   const [refundReason, setRefundReason] = useState('')
   const [refundMethod, setRefundMethod] = useState('')
 
+  useEffect(() => {
+    window.scrollTo(0, 0)
+    fetchOrder()
+  }, [orderId])
+
   const fetchOrder = async () => {
     if (!orderId) {
       setError('Order ID not found')
@@ -236,11 +241,6 @@ function OrderConfirmationContent() {
       setLoading(false)
     }
   }
-
-  useEffect(() => {
-    window.scrollTo(0, 0)
-    fetchOrder()
-  }, [orderId])
 
   const formatDate = (dateString: string) => {
     return new Date(dateString).toLocaleDateString('en-IN', {

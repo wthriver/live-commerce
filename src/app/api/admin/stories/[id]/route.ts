@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { StoryRepository } from '@/db/story.repository'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function GET(
   request: NextRequest,
@@ -10,8 +7,9 @@ export async function GET(
 ) {
   try {
     const { id } = await params
-    const env = getEnv(request)
-    const story = await StoryRepository.findById(env, id)
+    const story = await db.story.findUnique({
+      where: { id }
+    })
 
     if (!story) {
       return NextResponse.json(
@@ -23,9 +21,15 @@ export async function GET(
       )
     }
 
+    // Parse images JSON
+    const storyWithParsedImages = {
+      ...story,
+      images: JSON.parse(story.images || '[]')
+    }
+
     return NextResponse.json({
       success: true,
-      data: story
+      data: storyWithParsedImages
     })
   } catch (error) {
     console.error('Error fetching story:', error)
@@ -45,31 +49,29 @@ export async function PUT(
 ) {
   try {
     const { id } = await params
-    const env = getEnv(request)
     const body = await request.json()
     const { title, thumbnail, images, isActive, order } = body
 
-    const story = await StoryRepository.update(env, id, {
-      ...(title !== undefined && { title }),
-      ...(thumbnail !== undefined && { thumbnail }),
-      ...(images !== undefined && { images: Array.isArray(images) ? images : [] }),
-      ...(isActive !== undefined && { isActive }),
-      ...(order !== undefined && { orderNum: order })
+    const story = await db.story.update({
+      where: { id },
+      data: {
+        ...(title !== undefined && { title }),
+        ...(thumbnail !== undefined && { thumbnail }),
+        ...(images !== undefined && { images: JSON.stringify(Array.isArray(images) ? images : []) }),
+        ...(isActive !== undefined && { isActive }),
+        ...(order !== undefined && { order })
+      }
     })
 
-    if (!story) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Story not found'
-        },
-        { status: 404 }
-      )
+    // Return with parsed images
+    const storyWithParsedImages = {
+      ...story,
+      images: JSON.parse(story.images || '[]')
     }
 
     return NextResponse.json({
       success: true,
-      data: story
+      data: storyWithParsedImages
     })
   } catch (error) {
     console.error('Error updating story:', error)
@@ -89,8 +91,9 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params
-    const env = getEnv(request)
-    await StoryRepository.delete(env, id)
+    await db.story.delete({
+      where: { id }
+    })
 
     return NextResponse.json({
       success: true,

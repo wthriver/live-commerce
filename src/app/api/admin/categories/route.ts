@@ -1,17 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { CategoryRepository } from '@/db/category.repository'
-import { queryAll, count, numberToBool } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function GET(request: NextRequest) {
   try {
-    const env = getEnv(request)
     const searchParams = request.nextUrl.searchParams
     const search = searchParams.get('search') || ''
 
-    let categories = await CategoryRepository.findAll(env)
+    let categories = await db.category.findMany({
+      include: {
+        _count: {
+          select: {
+            products: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    })
 
     if (search) {
       categories = categories.filter(
@@ -21,21 +27,10 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Add product counts
-    const categoriesWithCounts = []
-    for (const category of categories) {
-      const productCount = await count(env, 'products', 'WHERE categoryId = ?', category.id)
-      categoriesWithCounts.push({
-        ...category,
-        _count: { products: productCount },
-        isActive: numberToBool(category.isActive)
-      })
-    }
-
     return NextResponse.json({
       success: true,
-      data: categoriesWithCounts,
-      total: categoriesWithCounts.length,
+      data: categories,
+      total: categories.length,
     })
   } catch (error) {
     console.error('Error fetching categories:', error)
@@ -51,18 +46,17 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const env = getEnv(request)
     const body = await request.json()
 
-    const category = await CategoryRepository.create(env, {
-      name: body.name,
-      slug: body.slug,
-      description: body.description,
-      image: body.image,
-      isActive: body.isActive ?? true,
+    const category = await db.category.create({
+      data: {
+        name: body.name,
+        slug: body.slug,
+        description: body.description,
+        image: body.image,
+        isActive: body.isActive ?? true,
+      },
     })
-
-    category.isActive = numberToBool(category.isActive)
 
     return NextResponse.json({
       success: true,

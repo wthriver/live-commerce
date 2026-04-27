@@ -1,23 +1,28 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { StoryRepository } from '@/db/story.repository'
-import { queryFirst } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function GET(request: NextRequest) {
   try {
-    const env = getEnv(request)
     const searchParams = request.nextUrl.searchParams
     const activeOnly = searchParams.get('activeOnly') === 'true'
 
-    const stories = activeOnly
-      ? await StoryRepository.findAllActive(env)
-      : await StoryRepository.findAll(env)
+    const stories = await db.story.findMany({
+      orderBy: [
+        { order: 'asc' },
+        { createdAt: 'desc' }
+      ],
+      where: activeOnly ? { isActive: true } : undefined
+    })
+
+    // Parse images JSON
+    const storiesWithParsedImages = stories.map(story => ({
+      ...story,
+      images: JSON.parse(story.images || '[]')
+    }))
 
     return NextResponse.json({
       success: true,
-      data: stories
+      data: storiesWithParsedImages
     })
   } catch (error) {
     console.error('Error fetching stories:', error)
@@ -33,7 +38,6 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const env = getEnv(request)
     const body = await request.json()
     const { title, thumbnail, images, isActive, order } = body
 
@@ -48,27 +52,35 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Get highest order value if not provided
+    // Get the highest order value if not provided
     let storyOrder = order
     if (storyOrder === undefined) {
-      const maxOrder = await queryFirst<{ orderNum: number }>(
-        env,
-        'SELECT orderNum FROM stories ORDER BY orderNum DESC LIMIT 1'
-      )
-      storyOrder = maxOrder ? maxOrder.orderNum + 1 : 0
+      const maxOrder = await db.story.findFirst({
+        orderBy: { order: 'desc' },
+        select: { order: true }
+      })
+      storyOrder = maxOrder ? maxOrder.order + 1 : 0
     }
 
-    const story = await StoryRepository.create(env, {
-      title,
-      thumbnail,
-      images: Array.isArray(images) ? images : [],
-      isActive: isActive !== undefined ? isActive : true,
-      orderNum: storyOrder
+    const story = await db.story.create({
+      data: {
+        title,
+        thumbnail,
+        images: JSON.stringify(Array.isArray(images) ? images : []),
+        isActive: isActive !== undefined ? isActive : true,
+        order: storyOrder
+      }
     })
+
+    // Return with parsed images
+    const storyWithParsedImages = {
+      ...story,
+      images: JSON.parse(story.images)
+    }
 
     return NextResponse.json({
       success: true,
-      data: story
+      data: storyWithParsedImages
     }, { status: 201 })
   } catch (error) {
     console.error('Error creating story:', error)

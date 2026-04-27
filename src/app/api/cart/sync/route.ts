@@ -1,11 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { db } from '@/lib/db'
 import { verifyToken, extractTokenFromHeader } from '@/lib/jwt'
-import { getEnv } from '@/lib/cloudflare'
-import { CartRepository } from '@/db/cart.repository'
-import { UserRepository } from '@/db/user.repository'
-import { queryAll, queryFirst, parseJSON, numberToBool } from '@/db/db'
-
-export const runtime = 'edge';
 
 /**
  * POST /api/cart/sync
@@ -13,9 +8,6 @@ export const runtime = 'edge';
  * Called when user logs in
  */
 export async function POST(request: NextRequest) {
-  // Get D1 database from request context
-  const env = getEnv(request)
-
   try {
     // Get token from Authorization header or cookie
     const authHeader = request.headers.get('authorization')
@@ -48,22 +40,18 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Get existing database cart items with products and variants
-    const cartItems = await queryAll(
-      env,
-      `SELECT ci.*, p.name as productName, p.basePrice, p.comparePrice, p.images, p.stock, p.isActive,
-              v.sku, v.size, v.color, v.material
-       FROM cart_items ci
-       LEFT JOIN products p ON ci.productId = p.id
-       LEFT JOIN product_variants v ON ci.variantId = v.id
-       WHERE ci.userId = ?
-       ORDER BY ci.createdAt DESC`,
-      userId
-    )
+    // Get existing database cart items
+    const existingDbCart = await db.cartItem.findMany({
+      where: { userId },
+      include: { 
+        product: true,
+        variant: true,
+      },
+    })
 
     // Create a map for quick lookup (using productId + variantId as key)
     const dbCartMap = new Map(
-      cartItems.map((item: any) => [
+      existingDbCart.map((item) => [
         `${item.productId}-${item.variantId || 'no-variant'}`,
         item
       ])
@@ -85,51 +73,69 @@ export async function POST(request: NextRequest) {
         )
 
         if (newQuantity !== existingItem.quantity) {
-          await CartRepository.updateQuantity(env, existingItem.id, newQuantity)
+          await db.cartItem.update({
+            where: { id: existingItem.id },
+            data: { quantity: newQuantity },
+          })
           updatedCount++
         }
       } else {
         // Item only in local cart, add to database
-        await CartRepository.addItem(env, {
-          userId,
-          productId: localItem.id,
-          variantId: localItem.variantId,
-          quantity: localItem.quantity || 1,
+        await db.cartItem.create({
+          data: {
+            userId,
+            productId: localItem.id,
+            quantity: localItem.quantity || 1,
+            ...(localItem.variantId && { variantId: localItem.variantId }),
+            ...(localItem.variantSku && { variantSku: localItem.variantSku }),
+          },
         })
         addedCount++
       }
     }
 
     // Fetch merged cart
-    const mergedCart = await queryAll(
-      env,
-      `SELECT ci.*, p.name as productName, p.basePrice, p.comparePrice, p.images, p.stock, p.isActive,
-              v.sku, v.size, v.color, v.material
-       FROM cart_items ci
-       LEFT JOIN products p ON ci.productId = p.id
-       LEFT JOIN product_variants v ON ci.variantId = v.id
-       WHERE ci.userId = ?
-       ORDER BY ci.createdAt DESC`,
-      userId
-    )
+    const mergedCart = await db.cartItem.findMany({
+      where: { userId },
+      include: {
+        product: {
+          select: {
+            id: true,
+            name: true,
+            price: true,
+            comparePrice: true,
+            images: true,
+            stock: true,
+            isActive: true,
+          },
+        },
+        variant: {
+          select: {
+            id: true,
+            sku: true,
+            size: true,
+            color: true,
+            material: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
 
     // Transform to match cart store format
-    const formattedItems = mergedCart.map((item: any) => {
-      const images = parseJSON<string[]>(item.images) || []
-      return {
-        id: item.productId,
-        name: item.productName,
-        price: item.basePrice,
-        originalPrice: item.comparePrice,
-        image: images[0] || '',
-        quantity: item.quantity,
-        variantId: item.variantId || undefined,
-        variantSku: item.sku || undefined,
-        size: item.size || null,
-        color: item.color || null,
-        material: item.material || null,
-      }
-    })
+    const formattedItems = mergedCart.map((item) => ({
+      id: item.productId,
+      name: item.product.name,
+      price: item.product.price,
+      originalPrice: item.product.comparePrice,
+      image: item.product.images ? JSON.parse(item.product.images)[0] : '',
+      quantity: item.quantity,
+      variantId: item.variantId || undefined,
+      variantSku: item.variantSku || undefined,
+      size: item.variant?.size || null,
+      color: item.variant?.color || null,
+      material: item.variant?.material || null,
+    }))
 
     return NextResponse.json({
       success: true,

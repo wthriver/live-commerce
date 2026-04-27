@@ -1,12 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { ProductRepository } from '@/db/product.repository'
-import { CategoryRepository } from '@/db/category.repository'
+import { db } from '@/lib/db'
 import { generateSKU, checkSKUConflict } from '@/lib/sku-generator'
 import { z } from 'zod'
-import { queryFirst, queryAll, execute, boolToNumber, numberToBool, parseJSON, stringifyJSON, now, count } from '@/db/db'
-
-export const runtime = 'edge';
 
 /**
  * Schema for variant update
@@ -36,16 +31,15 @@ export async function GET(
   { params }: { params: Promise<{ id: string; variantId: string }> }
 ) {
   try {
-    const env = getEnv(request)
     const { id, variantId } = await params
 
     // Fetch variant
-    const variant = await queryFirst<any>(
-      env,
-      'SELECT * FROM product_variants WHERE id = ? AND productId = ? LIMIT 1',
-      variantId,
-      id
-    )
+    const variant = await db.productVariant.findUnique({
+      where: {
+        id: variantId,
+        productId: id,
+      },
+    })
 
     if (!variant) {
       return NextResponse.json(
@@ -63,12 +57,12 @@ export async function GET(
         price: variant.price,
         comparePrice: variant.comparePrice,
         stock: variant.stock,
-        images: parseJSON<string[]>(variant.images) || [],
+        images: variant.images ? JSON.parse(variant.images) : null,
         size: variant.size,
         color: variant.color,
         material: variant.material,
-        isActive: typeof variant.isActive === 'boolean' ? variant.isActive : numberToBool(variant.isActive),
-        isDefault: typeof variant.isDefault === 'boolean' ? variant.isDefault : numberToBool(variant.isDefault),
+        isActive: variant.isActive,
+        isDefault: variant.isDefault,
         lowStockAlert: variant.lowStockAlert,
         reorderLevel: variant.reorderLevel,
         reorderQty: variant.reorderQty,
@@ -97,16 +91,22 @@ export async function PUT(
   { params }: { params: Promise<{ id: string; variantId: string }> }
 ) {
   try {
-    const env = getEnv(request)
     const { id, variantId } = await params
 
     // Check if variant exists
-    const existingVariant = await queryFirst<any>(
-      env,
-      'SELECT v.*, p.name as productName, p.categoryId FROM product_variants v JOIN products p ON v.productId = p.id WHERE v.id = ? AND v.productId = ? LIMIT 1',
-      variantId,
-      id
-    )
+    const existingVariant = await db.productVariant.findUnique({
+      where: {
+        id: variantId,
+        productId: id,
+      },
+      include: {
+        product: {
+          include: {
+            category: true,
+          },
+        },
+      },
+    })
 
     if (!existingVariant) {
       return NextResponse.json(
@@ -115,26 +115,30 @@ export async function PUT(
       )
     }
 
-    // Fetch category for SKU generation
-    let category = null
-    if (existingVariant.categoryId) {
-      category = await CategoryRepository.findById(env, existingVariant.categoryId)
-    }
-
     // Parse request body
     const body = await request.json()
 
     // Validate input
     const validatedData = updateVariantSchema.parse(body)
 
+    // If images provided, stringify them for storage
+    const updateData: any = { ...validatedData }
+    if (validatedData.images) {
+      updateData.images = JSON.stringify(validatedData.images)
+    }
+
     // If setting as default, remove default from other variants
-    if (validatedData.isDefault === true && !numberToBool(existingVariant.isDefault)) {
-      await execute(
-        env,
-        'UPDATE product_variants SET isDefault = 0 WHERE productId = ? AND isDefault = 1 AND id != ?',
-        id,
-        variantId
-      )
+    if (validatedData.isDefault === true && !existingVariant.isDefault) {
+      await db.productVariant.updateMany({
+        where: {
+          productId: id,
+          isDefault: true,
+          id: { not: variantId },
+        },
+        data: {
+          isDefault: false,
+        },
+      })
     }
 
     // Regenerate SKU if size/color/material changed
@@ -144,8 +148,8 @@ export async function PUT(
       validatedData.material !== undefined
     ) {
       const newSku = generateSKU(
-        category?.slug || 'GEN',
-        existingVariant.productName,
+        existingVariant.product.category?.slug || 'GEN',
+        existingVariant.product.name,
         {
           size: validatedData.size ?? existingVariant.size,
           color: validatedData.color ?? existingVariant.color,
@@ -154,7 +158,7 @@ export async function PUT(
       )
 
       // Check for SKU conflicts (excluding this variant)
-      const hasConflict = await checkSKUConflict(env, newSku, variantId)
+      const hasConflict = await checkSKUConflict(newSku, variantId)
       if (hasConflict) {
         return NextResponse.json(
           { success: false, error: 'SKU already exists. Please try again.' },
@@ -162,25 +166,13 @@ export async function PUT(
         )
       }
 
-      // Update SKU using execute
-      await execute(env, 'UPDATE product_variants SET sku = ? WHERE id = ?', newSku, variantId)
+      updateData.sku = newSku
     }
 
     // Update variant
-    const variant = await ProductRepository.updateVariant(env, variantId, {
-      name: validatedData.name,
-      price: validatedData.price,
-      comparePrice: validatedData.comparePrice,
-      stock: validatedData.stock,
-      images: validatedData.images,
-      size: validatedData.size,
-      color: validatedData.color,
-      material: validatedData.material,
-      isActive: validatedData.isActive,
-      isDefault: validatedData.isDefault,
-      lowStockAlert: validatedData.lowStockAlert,
-      reorderLevel: validatedData.reorderLevel,
-      reorderQty: validatedData.reorderQty,
+    const variant = await db.productVariant.update({
+      where: { id: variantId },
+      data: updateData,
     })
 
     return NextResponse.json({
@@ -192,7 +184,7 @@ export async function PUT(
         price: variant.price,
         comparePrice: variant.comparePrice,
         stock: variant.stock,
-        images: variant.images,
+        images: variant.images ? JSON.parse(variant.images) : null,
         size: variant.size,
         color: variant.color,
         material: variant.material,
@@ -237,16 +229,15 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; variantId: string }> }
 ) {
   try {
-    const env = getEnv(request)
     const { id, variantId } = await params
 
     // Check if variant exists
-    const variant = await queryFirst<any>(
-      env,
-      'SELECT * FROM product_variants WHERE id = ? AND productId = ? LIMIT 1',
-      variantId,
-      id
-    )
+    const variant = await db.productVariant.findUnique({
+      where: {
+        id: variantId,
+        productId: id,
+      },
+    })
 
     if (!variant) {
       return NextResponse.json(
@@ -255,15 +246,17 @@ export async function DELETE(
       )
     }
 
-    // Check if variant is used in active orders
-    const activeOrders = await count(
-      env,
-      'order_items oi JOIN orders o ON oi.orderId = o.id',
-      'WHERE oi.variantId = ? AND o.status NOT IN (?, ?)',
-      variantId,
-      'CANCELLED',
-      'REFUNDED'
-    )
+    // Check if variant is used in active orders or cart
+    const activeOrders = await db.orderItem.count({
+      where: {
+        variantId,
+        order: {
+          status: {
+            notIn: ['CANCELLED', 'REFUNDED'],
+          },
+        },
+      },
+    })
 
     if (activeOrders > 0) {
       return NextResponse.json(
@@ -276,18 +269,20 @@ export async function DELETE(
     }
 
     // Delete variant
-    await ProductRepository.deleteVariant(env, variantId)
+    await db.productVariant.delete({
+      where: { id: variantId },
+    })
 
     // Check if product has any remaining variants
-    const remainingVariants = await count(
-      env,
-      'product_variants',
-      'WHERE productId = ?',
-      id
-    )
+    const remainingVariants = await db.productVariant.count({
+      where: { productId: id },
+    })
 
     if (remainingVariants === 0) {
-      await ProductRepository.update(env, id, { hasVariants: false })
+      await db.product.update({
+        where: { id },
+        data: { hasVariants: false },
+      })
     }
 
     return NextResponse.json({

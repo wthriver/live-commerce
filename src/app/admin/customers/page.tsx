@@ -106,6 +106,10 @@ export default function CustomersPage() {
     isVIP: false,
   })
 
+  useEffect(() => {
+    fetchCustomers()
+  }, [])
+
   const fetchCustomers = async () => {
     try {
       setLoading(true)
@@ -132,10 +136,6 @@ export default function CustomersPage() {
       setLoading(false)
     }
   }
-
-  useEffect(() => {
-    fetchCustomers()
-  }, [])
 
   const openAddModal = () => {
     setAddFormData({

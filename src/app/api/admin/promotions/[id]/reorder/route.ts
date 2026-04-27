@@ -1,15 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { queryFirst, execute, now } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function PUT(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
-    const env = getEnv(request)
     const { id } = await params
     const body = await request.json()
     const { order } = body
@@ -24,19 +20,10 @@ export async function PUT(
       )
     }
 
-    await execute(
-      env,
-      'UPDATE promotions SET `order` = ?, updatedAt = ? WHERE id = ?',
-      order,
-      now(),
-      id
-    )
-
-    const promotion = await queryFirst<any>(
-      env,
-      'SELECT * FROM promotions WHERE id = ? LIMIT 1',
-      id
-    )
+    const promotion = await db.promotion.update({
+      where: { id },
+      data: { order }
+    })
 
     return NextResponse.json({
       success: true,

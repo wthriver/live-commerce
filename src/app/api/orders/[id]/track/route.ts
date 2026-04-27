@@ -1,22 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { OrderRepository } from '@/db/order.repository'
-import { parseJSON } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function GET(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
-  // Get D1 database from request context
-  const env = getEnv(request)
-
   try {
     const orderId = params.id
 
-    // Fetch order with order items
-    const order = await OrderRepository.findById(env, orderId)
+    // Fetch order with tracking information
+    const order = await db.order.findUnique({
+      where: {
+        id: orderId,
+      },
+      include: {
+        orderItems: {
+          include: {
+            product: true,
+          },
+        },
+        user: true,
+      },
+    })
 
     if (!order) {
       return NextResponse.json(
@@ -27,12 +32,6 @@ export async function GET(
         { status: 404 }
       )
     }
-
-    // Fetch order items
-    const orderItems = await OrderRepository.getItems(env, orderId)
-
-    // Parse shipping address
-    const shippingAddress = order.shippingAddress ? parseJSON(order.shippingAddress) : null
 
     // Simulate courier tracking (Pathao, RedX, SA Paribahan)
     // In production, this would integrate with actual courier APIs
@@ -71,7 +70,7 @@ export async function GET(
           phone: order.customerPhone,
         },
         shipping: {
-          address: shippingAddress,
+          address: order.shippingAddress,
           city: order.city,
           district: order.district,
           division: order.division,
@@ -83,7 +82,7 @@ export async function GET(
             }
           : null,
         timeline: trackingTimeline,
-        items: orderItems.map((item) => ({
+        items: order.orderItems.map((item) => ({
           id: item.id,
           productName: item.productName,
           productImage: item.productImage,
@@ -105,7 +104,6 @@ export async function GET(
 }
 
 function generateTrackingTimeline(order: any) {
-  const createdAt = new Date(order.createdAt)
   const timeline = [
     {
       status: 'Ordered',
@@ -120,7 +118,7 @@ function generateTrackingTimeline(order: any) {
     timeline.push({
       status: 'Confirmed',
       description: 'Order has been confirmed',
-      date: new Date(createdAt.getTime() + 30 * 60 * 1000).toISOString(), // +30 minutes
+      date: new Date(order.createdAt.getTime() + 30 * 60 * 1000), // +30 minutes
       completed: true,
     })
   } else {
@@ -136,7 +134,7 @@ function generateTrackingTimeline(order: any) {
     timeline.push({
       status: 'Processing',
       description: 'Order is being processed and packed',
-      date: new Date(createdAt.getTime() + 2 * 60 * 60 * 1000).toISOString(), // +2 hours
+      date: new Date(order.createdAt.getTime() + 2 * 60 * 60 * 1000), // +2 hours
       completed: true,
     })
   } else {
@@ -159,7 +157,7 @@ function generateTrackingTimeline(order: any) {
     timeline.push({
       status: 'Shipped',
       description: `Order is ${trackingStatuses[order.trackingStatus] || 'shipped'}`,
-      date: new Date(createdAt.getTime() + 24 * 60 * 60 * 1000).toISOString(), // +1 day
+      date: new Date(order.createdAt.getTime() + 24 * 60 * 60 * 1000), // +1 day
       completed: true,
     })
   } else {
@@ -175,7 +173,7 @@ function generateTrackingTimeline(order: any) {
     timeline.push({
       status: 'Delivered',
       description: 'Order has been delivered successfully',
-      date: order.estimatedDeliveryDate || new Date().toISOString(),
+      date: order.estimatedDeliveryDate || new Date(),
       completed: true,
     })
   } else {
@@ -184,7 +182,7 @@ function generateTrackingTimeline(order: any) {
       description: order.status === 'CANCELLED'
         ? 'Order cancelled'
         : order.estimatedDeliveryDate
-          ? `Estimated delivery by ${new Date(order.estimatedDeliveryDate).toLocaleDateString()}`
+          ? `Estimated delivery by ${order.estimatedDeliveryDate.toLocaleDateString()}`
           : 'Delivery date pending',
       date: order.estimatedDeliveryDate || null,
       completed: order.status === 'DELIVERED',

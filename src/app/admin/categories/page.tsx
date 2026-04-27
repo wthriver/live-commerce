@@ -106,6 +106,10 @@ export default function CategoriesPage() {
   const [addImagePreview, setAddImagePreview] = useState<string | null>(null)
   const [editImagePreview, setEditImagePreview] = useState<string | null>(null)
 
+  useEffect(() => {
+    fetchCategories()
+  }, [])
+
   const fetchCategories = async () => {
     try {
       setLoading(true)
@@ -132,10 +136,6 @@ export default function CategoriesPage() {
       setLoading(false)
     }
   }
-
-  useEffect(() => {
-    fetchCategories()
-  }, [])
 
   const handleSearch = () => {
     fetchCategories()

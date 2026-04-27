@@ -47,6 +47,10 @@ export default function AnalyticsPage() {
   const [analytics, setAnalytics] = useState<any>(null)
   const [period, setPeriod] = useState('30')
 
+  useEffect(() => {
+    fetchAnalytics()
+  }, [period])
+
   const fetchAnalytics = async () => {
     try {
       setLoading(true)
@@ -62,10 +66,6 @@ export default function AnalyticsPage() {
       setLoading(false)
     }
   }
-
-  useEffect(() => {
-    fetchAnalytics()
-  }, [period])
 
   const formatCurrency = (value: number) => {
     return new Intl.NumberFormat('en-BD', {

@@ -1,9 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { queryFirst, execute, numberToBool, boolToNumber, now } from '@/db/db'
-import { ProductRepository } from '@/db/product.repository'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function PUT(
   request: NextRequest,
@@ -11,16 +7,15 @@ export async function PUT(
 ) {
   try {
     const { id } = await params
-    const env = getEnv(request)
     const body = await request.json()
     const alertId = id
 
     // Check if alert exists
-    const existingAlert = await queryFirst<any>(
-      env,
-      'SELECT * FROM inventory_alerts WHERE id = ? LIMIT 1',
-      alertId
-    )
+    const existingAlert = await db.inventoryAlert.findUnique({
+      where: {
+        id: alertId,
+      },
+    })
 
     if (!existingAlert) {
       return NextResponse.json(
@@ -33,48 +28,30 @@ export async function PUT(
     }
 
     // Update alert
-    const updates: string[] = []
-    const params: any[] = []
+    const updateData: any = {}
 
     if (body.isRead !== undefined) {
-      updates.push('isRead = ?')
-      params.push(boolToNumber(body.isRead))
+      updateData.isRead = body.isRead
     }
 
     if (body.isResolved !== undefined) {
-      updates.push('isResolved = ?')
-      params.push(boolToNumber(body.isResolved))
+      updateData.isResolved = body.isResolved
       if (body.isResolved === true) {
-        updates.push('resolvedAt = ?')
-        params.push(now())
+        updateData.resolvedAt = new Date()
       } else {
-        updates.push('resolvedAt = NULL')
+        updateData.resolvedAt = null
       }
     }
 
-    if (updates.length > 0) {
-      updates.push('updatedAt = ?')
-      params.push(now())
-      params.push(alertId)
-
-      await execute(
-        env,
-        `UPDATE inventory_alerts SET ${updates.join(', ')} WHERE id = ?`,
-        ...params
-      )
-    }
-
-    const alert = await queryFirst<any>(
-      env,
-      'SELECT * FROM inventory_alerts WHERE id = ? LIMIT 1',
-      alertId
-    )
-
-    // Enrich with product data
-    const product = await ProductRepository.findById(env, alert.productId)
-    ;(alert as any).product = product
-    alert.isRead = numberToBool(alert.isRead)
-    alert.isResolved = numberToBool(alert.isResolved)
+    const alert = await db.inventoryAlert.update({
+      where: {
+        id: alertId,
+      },
+      data: updateData,
+      include: {
+        product: true,
+      },
+    })
 
     return NextResponse.json({
       success: true,
@@ -99,15 +76,14 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params
-    const env = getEnv(request)
     const alertId = id
 
     // Check if alert exists
-    const existingAlert = await queryFirst<any>(
-      env,
-      'SELECT * FROM inventory_alerts WHERE id = ? LIMIT 1',
-      alertId
-    )
+    const existingAlert = await db.inventoryAlert.findUnique({
+      where: {
+        id: alertId,
+      },
+    })
 
     if (!existingAlert) {
       return NextResponse.json(
@@ -120,7 +96,11 @@ export async function DELETE(
     }
 
     // Delete alert
-    await execute(env, 'DELETE FROM inventory_alerts WHERE id = ?', alertId)
+    await db.inventoryAlert.delete({
+      where: {
+        id: alertId,
+      },
+    })
 
     return NextResponse.json({
       success: true,

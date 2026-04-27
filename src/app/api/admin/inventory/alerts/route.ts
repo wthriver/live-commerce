@@ -1,53 +1,56 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { queryAll, queryFirst, execute, generateId, now, numberToBool, boolToNumber } from '@/db/db'
-import { ProductRepository } from '@/db/product.repository'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
+import { AlertType } from '@prisma/client'
 
 export async function GET(request: NextRequest) {
   try {
-    const env = getEnv(request)
     const searchParams = request.nextUrl.searchParams
     const alertType = searchParams.get('alertType')
     const isRead = searchParams.get('isRead')
     const isResolved = searchParams.get('isResolved')
 
-    // Build WHERE clause
-    const conditions: string[] = []
-    const params: any[] = []
+    // Build where clause
+    const where: any = {}
 
     if (alertType && ['LOW_STOCK', 'OUT_OF_STOCK', 'REORDER_NEEDED'].includes(alertType)) {
-      conditions.push('alertType = ?')
-      params.push(alertType)
+      where.alertType = alertType
     }
 
-    if (isRead !== null && isRead !== '') {
-      conditions.push('isRead = ?')
-      params.push(boolToNumber(isRead === 'true'))
+    if (isRead !== null) {
+      where.isRead = isRead === 'true'
     }
 
-    if (isResolved !== null && isResolved !== '') {
-      conditions.push('isResolved = ?')
-      params.push(boolToNumber(isResolved === 'true'))
+    if (isResolved !== null) {
+      where.isResolved = isResolved === 'true'
     }
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
 
     // Fetch alerts
-    const alerts = await queryAll<any>(
-      env,
-      `SELECT * FROM inventory_alerts ${whereClause} ORDER BY createdAt DESC`,
-      ...params
-    )
-
-    // Enrich with product data
-    for (const alert of alerts) {
-      const product = await ProductRepository.findById(env, alert.productId)
-      ;(alert as any).product = product
-      alert.isRead = numberToBool(alert.isRead)
-      alert.isResolved = numberToBool(alert.isResolved)
-    }
+    const alerts = await db.inventoryAlert.findMany({
+      where,
+      include: {
+        product: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            price: true,
+            images: true,
+            stock: true,
+            lowStockAlert: true,
+            reorderLevel: true,
+            reorderQty: true,
+            category: {
+              select: {
+                name: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    })
 
     return NextResponse.json({
       success: true,
@@ -68,7 +71,6 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
-    const env = getEnv(request)
     const body = await request.json()
 
     if (!body.productId || !body.alertType) {
@@ -82,12 +84,13 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if alert already exists for this product and type
-    const existingAlert = await queryFirst<any>(
-      env,
-      'SELECT * FROM inventory_alerts WHERE productId = ? AND alertType = ? AND isResolved = 0 LIMIT 1',
-      body.productId,
-      body.alertType
-    )
+    const existingAlert = await db.inventoryAlert.findFirst({
+      where: {
+        productId: body.productId,
+        alertType: body.alertType,
+        isResolved: false,
+      },
+    })
 
     if (existingAlert) {
       return NextResponse.json({
@@ -97,34 +100,18 @@ export async function POST(request: NextRequest) {
     }
 
     // Create alert
-    const id = generateId()
-    const currentTime = now()
-
-    await execute(
-      env,
-      `INSERT INTO inventory_alerts (id, productId, alertType, quantity, isRead, isResolved, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      id,
-      body.productId,
-      body.alertType,
-      body.quantity || 0,
-      boolToNumber(false),
-      boolToNumber(false),
-      currentTime,
-      currentTime
-    )
-
-    const alert = await queryFirst<any>(
-      env,
-      'SELECT * FROM inventory_alerts WHERE id = ? LIMIT 1',
-      id
-    )
-
-    // Enrich with product data
-    const product = await ProductRepository.findById(env, alert.productId)
-    ;(alert as any).product = product
-    alert.isRead = numberToBool(alert.isRead)
-    alert.isResolved = numberToBool(alert.isResolved)
+    const alert = await db.inventoryAlert.create({
+      data: {
+        productId: body.productId,
+        alertType: body.alertType,
+        quantity: body.quantity || 0,
+        isRead: false,
+        isResolved: false,
+      },
+      include: {
+        product: true,
+      },
+    })
 
     return NextResponse.json({
       success: true,

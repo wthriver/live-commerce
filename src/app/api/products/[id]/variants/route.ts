@@ -1,9 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { ProductRepository } from '@/db/product.repository'
-import { queryFirst } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 /**
  * GET /api/products/[id]/variants
@@ -13,16 +9,14 @@ export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const env = getEnv(request)
   try {
     const { id } = await params
 
     // Fetch product to check if it exists
-    const product = await queryFirst(
-      env,
-      'SELECT id, hasVariants, basePrice, price FROM products WHERE id = ? LIMIT 1',
-      id
-    )
+    const product = await db.product.findUnique({
+      where: { id },
+      select: { id: true, hasVariants: true, basePrice: true, price: true },
+    })
 
     if (!product) {
       return NextResponse.json(
@@ -32,21 +26,31 @@ export async function GET(
     }
 
     // Fetch all variants for this product
-    const variants = await ProductRepository.getVariants(env, id)
+    const variants = await db.productVariant.findMany({
+      where: {
+        productId: id,
+        isActive: true,
+      },
+      orderBy: [
+        { isDefault: 'desc' },
+        { size: 'asc' },
+        { color: 'asc' },
+      ],
+    })
 
     return NextResponse.json({
       success: true,
       data: {
         hasVariants: product.hasVariants,
         basePrice: product.basePrice || product.price,
-        variants: variants.map((variant: any) => ({
+        variants: variants.map((variant) => ({
           id: variant.id,
           sku: variant.sku,
           name: variant.name,
           price: variant.price,
           comparePrice: variant.comparePrice,
           stock: variant.stock,
-          images: variant.images,
+          images: variant.images ? JSON.parse(variant.images) : null,
           size: variant.size,
           color: variant.color,
           material: variant.material,

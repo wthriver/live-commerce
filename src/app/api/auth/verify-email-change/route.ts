@@ -1,12 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { UserRepository } from '@/db/user.repository'
-import { queryFirst } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function GET(request: NextRequest) {
-  const env = getEnv(request)
   try {
     const { searchParams } = new URL(request.url)
     const token = searchParams.get('token')
@@ -18,11 +13,13 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const user = await queryFirst(
-      env,
-      'SELECT id, email, newEmail, name FROM users WHERE emailToken = ? AND newEmail IS NOT NULL LIMIT 1',
-      token
-    )
+    const user = await db.user.findFirst({
+      where: {
+        emailToken: token,
+        newEmail: { not: null },
+      },
+      select: { id: true, email: true, newEmail: true, name: true },
+    })
 
     if (!user) {
       return NextResponse.json(
@@ -31,11 +28,15 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    await UserRepository.update(env, user.id, {
-      email: user.newEmail,
-      emailVerified: true,
-      newEmail: null,
-      emailToken: null,
+    await db.user.update({
+      where: { id: user.id },
+      data: {
+        email: user.newEmail,
+        emailVerified: true,
+        newEmail: null,
+        emailToken: null,
+        updatedAt: new Date(),
+      },
     })
 
     return NextResponse.redirect(

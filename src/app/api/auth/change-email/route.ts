@@ -1,15 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { db } from '@/lib/db'
 import bcrypt from 'bcryptjs'
 import { verifyToken } from '@/lib/jwt'
 import { changeEmailSchema } from '@/lib/validations'
 import { rateLimit, createRateLimitResponse, getClientIp } from '@/lib/rate-limit'
-import { UserRepository } from '@/db/user.repository'
-import { getEnv } from '@/lib/cloudflare'
-
-export const runtime = 'edge';
 
 export async function POST(request: NextRequest) {
-  const env = getEnv(request)
   const clientIp = getClientIp(request)
   const rateLimitResult = rateLimit('change-email:' + clientIp, {
     maxRequests: 3,
@@ -37,7 +33,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const user = await UserRepository.findById(env, decoded.userId)
+    const user = await db.user.findUnique({
+      where: { id: decoded.userId },
+      select: { id: true, email: true, password: true },
+    })
 
     if (!user) {
       return NextResponse.json(
@@ -77,7 +76,9 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const existingUser = await UserRepository.findByEmail(env, newEmail)
+    const existingUser = await db.user.findUnique({
+      where: { email: newEmail },
+    })
 
     if (existingUser) {
       return NextResponse.json(
@@ -88,10 +89,14 @@ export async function POST(request: NextRequest) {
 
     const emailToken = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15)
 
-    await UserRepository.update(env, user.id, {
-      emailVerified: false,
-      newEmail: newEmail,
-      emailToken: emailToken,
+    await db.user.update({
+      where: { id: user.id },
+      data: {
+        emailVerified: false,
+        newEmail: newEmail,
+        emailToken: emailToken,
+        updatedAt: new Date(),
+      },
     })
 
     const verificationLink = (process.env.NEXT_PUBLIC_URL || 'http://localhost:3000') + '/api/auth/verify-email-change?token=' + emailToken

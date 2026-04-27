@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
+import { db } from '@/lib/db'
 import { verifyAdmin } from '@/lib/auth-utils'
-import { UserRepository } from '@/db/user.repository'
 import bcrypt from 'bcryptjs'
-import { count, numberToBool } from '@/db/db'
-
-export const runtime = 'edge';
 
 export async function GET(
   request: NextRequest,
@@ -21,8 +17,24 @@ export async function GET(
       )
     }
 
-    const env = getEnv(request)
-    const user = await UserRepository.findById(env, params.id)
+    const user = await db.user.findUnique({
+      where: { id: params.id },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        phone: true,
+        address: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: {
+          select: {
+            orders: true,
+          },
+        },
+      },
+    })
 
     if (!user) {
       return NextResponse.json(
@@ -34,16 +46,9 @@ export async function GET(
       )
     }
 
-    // Get order count
-    const orderCount = await count(env, 'orders', 'WHERE userId = ?', user.id)
-
     return NextResponse.json({
       success: true,
-      data: {
-        ...user,
-        emailVerified: numberToBool(user.emailVerified),
-        _count: { orders: orderCount },
-      },
+      data: user,
     })
   } catch (error) {
     console.error('Error fetching staff member:', error)
@@ -71,12 +76,13 @@ export async function PUT(
       )
     }
 
-    const env = getEnv(request)
     const body = await request.json()
     const { email, name, password, role, phone, address } = body
 
     // Check if user exists
-    const existingUser = await UserRepository.findById(env, params.id)
+    const existingUser = await db.user.findUnique({
+      where: { id: params.id },
+    })
 
     if (!existingUser) {
       return NextResponse.json(
@@ -90,7 +96,9 @@ export async function PUT(
 
     // Prevent modifying the last admin
     if (existingUser.role === 'admin' && role === 'staff') {
-      const adminCount = await UserRepository.count(env, 'admin' as any)
+      const adminCount = await db.user.count({
+        where: { role: 'admin' },
+      })
 
       if (adminCount <= 1) {
         return NextResponse.json(
@@ -131,29 +139,23 @@ export async function PUT(
     }
 
     // Update user
-    const user = await UserRepository.update(env, params.id, updateData)
-
-    if (!user) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Failed to update staff member',
-        },
-        { status: 500 }
-      )
-    }
+    const user = await db.user.update({
+      where: { id: params.id },
+      data: updateData,
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        role: true,
+        phone: true,
+        address: true,
+        updatedAt: true,
+      },
+    })
 
     return NextResponse.json({
       success: true,
-      data: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role,
-        phone: user.phone,
-        address: user.address,
-        updatedAt: user.updatedAt,
-      },
+      data: user,
       message: 'Staff member updated successfully',
     })
   } catch (error) {
@@ -182,10 +184,10 @@ export async function DELETE(
       )
     }
 
-    const env = getEnv(request)
-
     // Check if user exists
-    const existingUser = await UserRepository.findById(env, params.id)
+    const existingUser = await db.user.findUnique({
+      where: { id: params.id },
+    })
 
     if (!existingUser) {
       return NextResponse.json(
@@ -197,7 +199,7 @@ export async function DELETE(
       )
     }
 
-    // Prevent deleting admin
+    // Prevent deleting the admin
     if (existingUser.role === 'admin') {
       return NextResponse.json(
         {
@@ -209,7 +211,9 @@ export async function DELETE(
     }
 
     // Delete user
-    await UserRepository.delete(env, params.id)
+    await db.user.delete({
+      where: { id: params.id },
+    })
 
     return NextResponse.json({
       success: true,

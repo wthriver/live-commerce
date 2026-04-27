@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
@@ -13,7 +13,20 @@ export default function VerifyEmailPage() {
   const [success, setSuccess] = useState(false)
   const [error, setError] = useState('')
 
-  const verifyEmail = useCallback(async (token: string) => {
+  useEffect(() => {
+    // Get token from URL
+    const urlParams = new URLSearchParams(window.location.search)
+    const token = urlParams.get('token')
+
+    if (token) {
+      verifyEmail(token)
+    } else {
+      setLoading(false)
+      setError('Invalid or missing verification token. Please request a new verification email.')
+    }
+  }, [])
+
+  const verifyEmail = async (token: string) => {
     setLoading(true)
     try {
       const response = await fetch(`/api/auth/verify-email?token=${token}`)
@@ -31,20 +44,7 @@ export default function VerifyEmailPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
-
-  useEffect(() => {
-    // Get token from URL
-    const urlParams = new URLSearchParams(window.location.search)
-    const token = urlParams.get('token')
-
-    if (token) {
-      verifyEmail(token)
-    } else {
-      setLoading(false)
-      setError('Invalid or missing verification token. Please request a new verification email.')
-    }
-  }, [verifyEmail])
+  }
 
   const handleBackToHome = () => {
     router.push('/')

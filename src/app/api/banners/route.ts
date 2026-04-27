@@ -1,31 +1,26 @@
-import { NextResponse } from 'next/server';
-import { getEnv } from '@/lib/cloudflare';
-import { BannerRepository } from '@/db/banner.repository';
-import { addCacheHeaders, CachePresets } from '@/lib/http-cache';
+import { NextResponse } from 'next/server'
+import { db } from '@/lib/db'
 
-// Edge Runtime export for Cloudflare
-export const runtime = 'edge';
-
-export async function GET(request: Request) {
-  // Get D1 database from request context (Cloudflare Pages/Workers)
-  const env = getEnv(request);
-
+export async function GET() {
   try {
-    const banners = await BannerRepository.findAllActive(env);
+    const banners = await db.banner.findMany({
+      where: { isActive: true },
+      orderBy: [
+        { order: 'asc' },
+        { createdAt: 'desc' }
+      ]
+    })
 
-    const response = NextResponse.json({
+    return NextResponse.json({
       success: true,
       data: banners
-    });
-
-    // Add caching headers for banners
-    return addCacheHeaders(response, CachePresets.SEMI_STATIC);
+    })
   } catch (error) {
-    console.error('Error fetching banners:', error);
+    console.error('Error fetching banners:', error)
     // Return empty array on error instead of failing
     return NextResponse.json({
       success: false,
       data: []
-    });
+    })
   }
 }

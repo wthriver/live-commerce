@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { queryAll, execute, queryFirst, generateId, now, parseJSON, stringifyJSON, boolToNumber, numberToBool } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 // Default homepage settings
 const DEFAULT_SETTINGS = {
@@ -32,13 +29,9 @@ const DEFAULT_SETTINGS = {
   }
 }
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   try {
-    const env = getEnv(request)
-    const settings = await queryAll<any>(
-      env,
-      'SELECT * FROM homepage_settings'
-    )
+    const settings = await db.homepageSettings.findMany()
 
     // If no settings exist, return defaults
     if (settings.length === 0) {
@@ -48,16 +41,9 @@ export async function GET(request: NextRequest) {
       })
     }
 
-    // Parse JSON fields and convert booleans
-    const settingsWithParsedData = settings.map((s: any) => ({
-      ...s,
-      settings: parseJSON<any>(s.settings) || null,
-      isEnabled: typeof s.isEnabled === 'boolean' ? s.isEnabled : numberToBool(s.isEnabled),
-    }))
-
     return NextResponse.json({
       success: true,
-      data: settingsWithParsedData
+      data: settings
     })
   } catch (error) {
     console.error('Error fetching homepage settings:', error)
@@ -73,7 +59,6 @@ export async function GET(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
-    const env = getEnv(request)
     const body = await request.json()
     const { settings } = body
 
@@ -92,92 +77,28 @@ export async function PUT(request: NextRequest) {
       settings.map(async (setting: any) => {
         const { sectionName, isEnabled, autoPlay, displayLimit, customSettings } = setting
 
-        // Check if setting exists
-        const existing = await queryFirst<any>(
-          env,
-          'SELECT * FROM homepage_settings WHERE sectionName = ? LIMIT 1',
-          sectionName
-        )
-
-        if (existing) {
-          // Update existing setting
-          const updates: string[] = []
-          const params: any[] = []
-
-          if (isEnabled !== undefined) {
-            updates.push('isEnabled = ?')
-            params.push(boolToNumber(isEnabled))
-          }
-          if (autoPlay !== undefined) {
-            updates.push('autoPlay = ?')
-            params.push(autoPlay)
-          }
-          if (displayLimit !== undefined) {
-            updates.push('displayLimit = ?')
-            params.push(displayLimit)
-          }
-          if (customSettings !== undefined) {
-            updates.push('settings = ?')
-            params.push(stringifyJSON(customSettings))
-          }
-
-          if (updates.length > 0) {
-            updates.push('updatedAt = ?')
-            params.push(now())
-            params.push(sectionName)
-
-            await execute(
-              env,
-              `UPDATE homepage_settings SET ${updates.join(', ')} WHERE sectionName = ?`,
-              ...params
-            )
-          }
-
-          // Fetch updated setting
-          return await queryFirst<any>(
-            env,
-            'SELECT * FROM homepage_settings WHERE sectionName = ? LIMIT 1',
-            sectionName
-          )
-        } else {
-          // Create new setting
-          const id = generateId()
-          const currentTime = now()
-
-          await execute(
-            env,
-            `INSERT INTO homepage_settings (id, sectionName, isEnabled, autoPlay, displayLimit, settings, createdAt, updatedAt)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            id,
+        return await db.homepageSettings.upsert({
+          where: { sectionName },
+          update: {
+            ...(isEnabled !== undefined && { isEnabled }),
+            ...(autoPlay !== undefined && { autoPlay }),
+            ...(displayLimit !== undefined && { displayLimit }),
+            ...(customSettings !== undefined && { settings: JSON.stringify(customSettings) })
+          },
+          create: {
             sectionName,
-            boolToNumber(isEnabled !== undefined ? isEnabled : true),
-            autoPlay !== undefined ? autoPlay : 5000,
-            displayLimit || null,
-            customSettings ? stringifyJSON(customSettings) : null,
-            currentTime,
-            currentTime
-          )
-
-          // Fetch created setting
-          return await queryFirst<any>(
-            env,
-            'SELECT * FROM homepage_settings WHERE sectionName = ? LIMIT 1',
-            sectionName
-          )
-        }
+            isEnabled: isEnabled !== undefined ? isEnabled : true,
+            autoPlay: autoPlay !== undefined ? autoPlay : 5000,
+            displayLimit,
+            settings: customSettings ? JSON.stringify(customSettings) : null
+          }
+        })
       })
     )
 
-    // Parse JSON fields and convert booleans
-    const settingsWithParsedData = updatedSettings.map((s: any) => ({
-      ...s,
-      settings: parseJSON<any>(s.settings) || null,
-      isEnabled: typeof s.isEnabled === 'boolean' ? s.isEnabled : numberToBool(s.isActive),
-    }))
-
     return NextResponse.json({
       success: true,
-      data: settingsWithParsedData
+      data: updatedSettings
     })
   } catch (error) {
     console.error('Error updating homepage settings:', error)

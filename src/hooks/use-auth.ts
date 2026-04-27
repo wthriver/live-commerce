@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 
 interface User {
@@ -15,7 +15,12 @@ export function useAuth() {
   const [loading, setLoading] = useState(true)
   const router = useRouter()
 
-  const checkSession = useCallback(async () => {
+  useEffect(() => {
+    // Check session on mount
+    checkSession()
+  }, [])
+
+  const checkSession = async () => {
     try {
       const response = await fetch('/api/auth/session')
       const data = await response.json()
@@ -31,12 +36,7 @@ export function useAuth() {
     } finally {
       setLoading(false)
     }
-  }, [])
-
-  useEffect(() => {
-    // Check session on mount
-    checkSession()
-  }, [checkSession])
+  }
 
   const login = async (email: string, password: string) => {
     const response = await fetch('/api/auth/login', {

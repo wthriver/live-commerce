@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken, extractTokenFromHeader } from './auth'
-import { getEnv } from '@/lib/cloudflare'
-import { UserRepository } from '@/db/user.repository'
+import { db } from './db'
 
 export interface AdminUser {
   id: string
@@ -40,8 +39,15 @@ export async function verifyAdminAuth(
     }
 
     // Verify user exists and has valid role
-    const env = getEnv(request)
-    const user = await UserRepository.findById(env, payload.userId)
+    const user = await db.user.findUnique({
+      where: { id: payload.userId },
+      select: {
+        id: true,
+        email: true,
+        role: true,
+        name: true,
+      },
+    })
 
     if (!user) {
       return NextResponse.json(

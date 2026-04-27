@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { queryAll, count, parseJSON, numberToBool } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 // Bangladesh divisions
 const BANGLADESH_DIVISIONS = [
@@ -12,7 +9,6 @@ const BANGLADESH_DIVISIONS = [
 
 export async function GET(request: NextRequest) {
   try {
-    const env = getEnv(request)
     const searchParams = request.nextUrl.searchParams
     const period = searchParams.get('period') || '30'
 
@@ -24,80 +20,45 @@ export async function GET(request: NextRequest) {
     const previousDaysAgo = new Date(daysAgo)
     previousDaysAgo.setDate(previousDaysAgo.getDate() - parseInt(period))
 
-    const daysAgoIso = daysAgo.toISOString()
-    const previousDaysAgoIso = previousDaysAgo.toISOString()
+    // Fetch current period data
+    const currentPeriodOrders = await db.order.findMany({
+      where: {
+        createdAt: {
+          gte: daysAgo,
+        },
+      },
+      include: {
+        orderItems: {
+          include: {
+            product: {
+              include: {
+                category: true,
+              },
+            },
+          },
+        },
+      },
+    })
 
-    // Fetch current period orders with items and products
-    const currentPeriodOrders = await queryAll<any>(
-      env,
-      `SELECT o.id, o.total, o.status, o.userId, o.createdAt, o.shippingAddress,
-              oi.id as itemId, oi.productId, oi.price as itemPrice, oi.quantity,
-              p.name as productName, p.basePrice, p.categoryId
-       FROM orders o
-       LEFT JOIN order_items oi ON o.id = oi.orderId
-       LEFT JOIN products p ON oi.productId = p.id
-       WHERE o.createdAt >= ?
-       ORDER BY o.createdAt DESC`,
-      daysAgoIso
-    )
-
-    // Group orders by orderId
-    const ordersMap = new Map<string, any>()
-    for (const row of currentPeriodOrders) {
-      if (!ordersMap.has(row.id)) {
-        ordersMap.set(row.id, {
-          id: row.id,
-          total: row.total,
-          status: row.status,
-          userId: row.userId,
-          createdAt: row.createdAt,
-          shippingAddress: row.shippingAddress,
-          items: [],
-        })
-      }
-      if (row.itemId) {
-        ordersMap.get(row.id)!.items.push({
-          productId: row.productId,
-          productName: row.productName,
-          basePrice: row.basePrice,
-          price: row.itemPrice,
-          quantity: row.quantity,
-          categoryId: row.categoryId,
-        })
-      }
-    }
-
-    const ordersList = Array.from(ordersMap.values())
-
-    // Fetch previous period orders for comparison
-    const previousOrders = await queryAll<any>(
-      env,
-      `SELECT o.id, o.total, oi.price as itemPrice, oi.quantity
-       FROM orders o
-       LEFT JOIN order_items oi ON o.id = oi.orderId
-       WHERE o.createdAt >= ? AND o.createdAt < ?`,
-      previousDaysAgoIso,
-      daysAgoIso
-    )
-
-    const previousOrdersMap = new Map<string, any>()
-    for (const row of previousOrders) {
-      if (!previousOrdersMap.has(row.id)) {
-        previousOrdersMap.set(row.id, { total: 0 })
-      }
-      if (row.itemPrice) {
-        previousOrdersMap.get(row.id)!.total += row.itemPrice * row.quantity
-      }
-    }
-
-    const previousOrdersList = Array.from(previousOrdersMap.values())
+    // Fetch previous period data for comparison
+    const previousPeriodOrders = await db.order.findMany({
+      where: {
+        createdAt: {
+          gte: previousDaysAgo,
+          lt: daysAgo,
+        },
+      },
+      include: {
+        orderItems: true,
+      },
+    })
 
     // Calculate totals
-    const currentRevenue = ordersList.reduce((sum, order) => sum + order.total, 0)
-    const previousRevenue = previousOrdersList.reduce((sum, order) => sum + order.total, 0)
+    const currentRevenue = currentPeriodOrders.reduce((sum, order) => sum + order.total, 0)
+    const previousRevenue = previousPeriodOrders.reduce((sum, order) => sum + order.total, 0)
 
-    const currentOrdersCount = ordersList.length
-    const previousOrdersCount = previousOrdersList.length
+    const currentOrdersCount = currentPeriodOrders.length
+    const previousOrdersCount = previousPeriodOrders.length
 
     const revenueGrowth = previousRevenue > 0
       ? ((currentRevenue - previousRevenue) / previousRevenue) * 100
@@ -109,19 +70,12 @@ export async function GET(request: NextRequest) {
 
     const avgOrderValue = currentOrdersCount > 0 ? currentRevenue / currentOrdersCount : 0
 
-    // Fetch categories for sales by category
-    const allCategories = await queryAll<any>(
-      env,
-      'SELECT id, name FROM categories'
-    )
-    const categoryMap = new Map(allCategories.map(c => [c.id, c.name]))
-
     // Sales by category
     const salesByCategory: Record<string, { revenue: number; count: number }> = {}
 
-    for (const order of ordersList) {
-      for (const item of order.items) {
-        const categoryName = categoryMap.get(item.categoryId) || 'Uncategorized'
+    for (const order of currentPeriodOrders) {
+      for (const item of order.orderItems) {
+        const categoryName = item.product?.category?.name || 'Uncategorized'
         if (!salesByCategory[categoryName]) {
           salesByCategory[categoryName] = { revenue: 0, count: 0 }
         }
@@ -139,16 +93,15 @@ export async function GET(request: NextRequest) {
     // Sales by product (top products)
     const salesByProduct: Record<string, { name: string; revenue: number; count: number; category: string }> = {}
 
-    for (const order of ordersList) {
-      for (const item of order.items) {
+    for (const order of currentPeriodOrders) {
+      for (const item of order.orderItems) {
         const productName = item.productName || 'Unknown'
-        const categoryName = categoryMap.get(item.categoryId) || 'Uncategorized'
         if (!salesByProduct[productName]) {
           salesByProduct[productName] = {
             name: productName,
             revenue: 0,
             count: 0,
-            category: categoryName,
+            category: item.product?.category?.name || 'Uncategorized',
           }
         }
         salesByProduct[productName].revenue += item.price * item.quantity
@@ -162,7 +115,8 @@ export async function GET(request: NextRequest) {
 
     // Sales over time (daily/weekly/monthly)
     const salesOverTime: Record<string, { revenue: number; orders: number }> = {}
-    for (const order of ordersList) {
+
+    for (const order of currentPeriodOrders) {
       const date = new Date(order.createdAt)
       let key: string
 
@@ -203,11 +157,8 @@ export async function GET(request: NextRequest) {
       REFUNDED: 0,
     }
 
-    for (const order of ordersList) {
-      const status = order.status as keyof typeof statusDistribution
-      if (statusDistribution[status] !== undefined) {
-        statusDistribution[status]++
-      }
+    for (const order of currentPeriodOrders) {
+      statusDistribution[order.status]++
     }
 
     const statusChartData = Object.entries(statusDistribution).map(([name, value]) => ({
@@ -216,22 +167,28 @@ export async function GET(request: NextRequest) {
     }))
 
     // Customer metrics
-    const currentCustomers = await queryAll<any>(
-      env,
-      'SELECT * FROM users WHERE role = ? AND createdAt >= ?',
-      'user',
-      daysAgoIso
-    )
+    const currentCustomers = await db.user.findMany({
+      where: {
+        role: 'user',
+        createdAt: {
+          gte: daysAgo,
+        },
+      },
+    })
 
-    const previousCustomers = await queryAll<any>(
-      env,
-      'SELECT * FROM users WHERE role = ? AND createdAt >= ? AND createdAt < ?',
-      'user',
-      previousDaysAgoIso,
-      daysAgoIso
-    )
+    const previousCustomers = await db.user.findMany({
+      where: {
+        role: 'user',
+        createdAt: {
+          gte: previousDaysAgo,
+          lt: daysAgo,
+        },
+      },
+    })
 
-    const totalCustomers = await count(env, 'users', 'WHERE role = ?', 'user')
+    const totalCustomers = await db.user.count({
+      where: { role: 'user' },
+    })
 
     const newCustomerGrowth = previousCustomers.length > 0
       ? ((currentCustomers.length - previousCustomers.length) / previousCustomers.length) * 100
@@ -239,7 +196,7 @@ export async function GET(request: NextRequest) {
 
     // Calculate returning customers (customers with more than 1 order)
     const customerOrderCounts: Record<string, number> = {}
-    for (const order of ordersList) {
+    for (const order of currentPeriodOrders) {
       if (order.userId) {
         customerOrderCounts[order.userId] = (customerOrderCounts[order.userId] || 0) + 1
       }
@@ -254,13 +211,8 @@ export async function GET(request: NextRequest) {
       geographicDistribution[div] = 0
     })
 
-    for (const order of ordersList) {
-      let address = order.shippingAddress
-      try {
-        address = typeof address === 'string' ? JSON.parse(address) : address
-      } catch (e) {
-        // address is already an object or invalid
-      }
+    for (const order of currentPeriodOrders) {
+      const address = order.shippingAddress as any
       const division = address?.division || 'Other'
       if (geographicDistribution[division] !== undefined) {
         geographicDistribution[division]++

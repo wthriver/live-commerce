@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Star, Check, ChevronDown, ChevronUp, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -32,12 +32,16 @@ export function ReviewsSection({ productId, averageRating = 0, reviewCount = 0 }
   const [sortBy, setSortBy] = useState<'latest' | 'highest'>('latest')
   const [showAll, setShowAll] = useState(false)
 
-  const fetchReviews = useCallback(async () => {
+  useEffect(() => {
+    fetchReviews()
+  }, [productId])
+
+  const fetchReviews = async () => {
     try {
       setLoading(true)
       const response = await fetch(`/api/reviews?productId=${productId}`)
       const data = await response.json()
-
+      
       if (data.success) {
         setReviews(data.data)
       }
@@ -46,11 +50,7 @@ export function ReviewsSection({ productId, averageRating = 0, reviewCount = 0 }
     } finally {
       setLoading(false)
     }
-  }, [productId])
-
-  useEffect(() => {
-    fetchReviews()
-  }, [fetchReviews])
+  }
 
   const getSortedReviews = () => {
     const sorted = [...reviews]

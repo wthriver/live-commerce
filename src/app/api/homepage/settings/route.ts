@@ -1,17 +1,9 @@
 import { NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { queryAll } from '@/db/db'
-import { parseJSON } from '@/db/db'
+import { db } from '@/lib/db'
 
-export const runtime = 'edge';
-
-export async function GET(request: Request) {
-  const env = getEnv(request)
+export async function GET() {
   try {
-    const settings = await queryAll(
-      env,
-      'SELECT * FROM homepage_settings'
-    )
+    const settings = await db.homepageSettings.findMany()
 
     // If no settings exist, return defaults
     if (settings.length === 0) {
@@ -47,13 +39,13 @@ export async function GET(request: Request) {
     }
 
     // Convert settings array to object
-    const settingsObject = settings.reduce((acc: any, setting: any) => {
+    const settingsObject = settings.reduce((acc: any, setting) => {
       acc[setting.sectionName] = {
         sectionName: setting.sectionName,
         isEnabled: setting.isEnabled,
         autoPlay: setting.autoPlay,
         displayLimit: setting.displayLimit,
-        settings: setting.settings ? parseJSON(setting.settings) : null
+        settings: setting.settings ? JSON.parse(setting.settings) : null
       }
       return acc
     }, {})

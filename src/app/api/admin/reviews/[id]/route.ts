@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { queryFirst, queryAll, execute, boolToNumber, numberToBool, parseJSON } from '@/db/db'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
+import { verifyAdmin } from '@/lib/auth-utils'
 
 // PUT /api/admin/reviews/[id] - Approve/Reject review
 export async function PUT(
@@ -10,7 +8,15 @@ export async function PUT(
   { params }: { params: { id: string } }
 ) {
   try {
-    const env = getEnv(request)
+    // Verify admin access
+    const authResult = await verifyAdmin(request)
+    if (!authResult.success) {
+      return NextResponse.json(
+        { error: authResult.error },
+        { status: authResult.error === 'Authentication required' ? 401 : 403 }
+      )
+    }
+
     const { id } = await params
     const body = await request.json()
     const { action } = body // approve or reject
@@ -25,11 +31,9 @@ export async function PUT(
     const reviewId = id
 
     // Check if review exists
-    const review = await queryFirst<any>(
-      env,
-      'SELECT pr.*, u.id as userId, u.name as userName, u.email as userEmail, p.id as productId, p.name as productName, p.slug as productSlug FROM product_reviews pr JOIN users u ON pr.userId = u.id JOIN products p ON pr.productId = p.id WHERE pr.id = ? LIMIT 1',
-      reviewId
-    )
+    const review = await db.productReview.findUnique({
+      where: { id: reviewId },
+    })
 
     if (!review) {
       return NextResponse.json(
@@ -39,46 +43,33 @@ export async function PUT(
     }
 
     // Update review
-    await execute(
-      env,
-      'UPDATE product_reviews SET isApproved = ?, updatedAt = datetime("now") WHERE id = ?',
-      boolToNumber(action === 'approve'),
-      reviewId
-    )
-
-    // Fetch updated review
-    const updatedReview = await queryFirst<any>(
-      env,
-      'SELECT pr.*, u.id as userId, u.name as userName, u.email as userEmail, p.id as productId, p.name as productName, p.slug as productSlug, p.images as productImages FROM product_reviews pr JOIN users u ON pr.userId = u.id JOIN products p ON pr.productId = p.id WHERE pr.id = ? LIMIT 1',
-      reviewId
-    )
+    const updatedReview = await db.productReview.update({
+      where: { id: reviewId },
+      data: {
+        isApproved: action === 'approve',
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+        product: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+          },
+        },
+      },
+    })
 
     return NextResponse.json({
       success: true,
       message: action === 'approve' ? 'Review approved' : 'Review rejected',
-      data: {
-        id: updatedReview.id,
-        userId: updatedReview.userId,
-        productId: updatedReview.productId,
-        rating: updatedReview.rating,
-        title: updatedReview.title,
-        comment: updatedReview.comment,
-        isApproved: typeof updatedReview.isApproved === 'boolean' ? updatedReview.isApproved : numberToBool(updatedReview.isApproved),
-        isVerified: typeof updatedReview.isVerified === 'boolean' ? updatedReview.isVerified : numberToBool(updatedReview.isVerified),
-        createdAt: updatedReview.createdAt,
-        updatedAt: updatedReview.updatedAt,
-        user: {
-          id: updatedReview.userId,
-          name: updatedReview.userName,
-          email: updatedReview.userEmail,
-        },
-        product: {
-          id: updatedReview.productId,
-          name: updatedReview.productName,
-          slug: updatedReview.productSlug,
-          images: parseJSON<string[]>(updatedReview.productImages) || [],
-        },
-      },
+      data: updatedReview,
     })
   } catch (error) {
     console.error('Error updating review:', error)
@@ -95,16 +86,22 @@ export async function DELETE(
   { params }: { params: { id: string } }
 ) {
   try {
-    const env = getEnv(request)
+    // Verify admin access
+    const authResult = await verifyAdmin(request)
+    if (!authResult.success) {
+      return NextResponse.json(
+        { error: authResult.error },
+        { status: authResult.error === 'Authentication required' ? 401 : 403 }
+      )
+    }
+
     const { id } = await params
     const reviewId = id
 
     // Check if review exists
-    const review = await queryFirst<any>(
-      env,
-      'SELECT * FROM product_reviews WHERE id = ? LIMIT 1',
-      reviewId
-    )
+    const review = await db.productReview.findUnique({
+      where: { id: reviewId },
+    })
 
     if (!review) {
       return NextResponse.json(
@@ -114,7 +111,9 @@ export async function DELETE(
     }
 
     // Delete review
-    await execute(env, 'DELETE FROM product_reviews WHERE id = ?', reviewId)
+    await db.productReview.delete({
+      where: { id: reviewId },
+    })
 
     return NextResponse.json({
       success: true,

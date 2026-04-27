@@ -1,27 +1,32 @@
-import { NextResponse } from 'next/server';
-import { getEnv } from '@/lib/cloudflare';
-import { ReelRepository } from '@/db/reel.repository';
+import { NextResponse } from 'next/server'
+import { db } from '@/lib/db'
 
-// Edge Runtime export for Cloudflare
-export const runtime = 'edge';
-
-export async function GET(request: Request) {
-  // Get D1 database from request context (Cloudflare Pages/Workers)
-  const env = getEnv(request);
-
+export async function GET() {
   try {
-    const reels = await ReelRepository.findAllActive(env);
+    const reels = await db.reel.findMany({
+      where: { isActive: true },
+      orderBy: [
+        { order: 'asc' },
+        { createdAt: 'desc' }
+      ]
+    })
+
+    // Parse productIds JSON
+    const reelsWithParsedProductIds = reels.map(reel => ({
+      ...reel,
+      productIds: reel.productIds ? JSON.parse(reel.productIds) : []
+    }))
 
     return NextResponse.json({
       success: true,
-      data: reels
-    });
+      data: reelsWithParsedProductIds
+    })
   } catch (error) {
-    console.error('Error fetching reels:', error);
+    console.error('Error fetching reels:', error)
     // Return empty array on error instead of failing
     return NextResponse.json({
       success: false,
       data: []
-    });
+    })
   }
 }

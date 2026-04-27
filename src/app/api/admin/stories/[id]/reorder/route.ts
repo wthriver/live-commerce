@@ -1,8 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEnv } from '@/lib/cloudflare'
-import { StoryRepository } from '@/db/story.repository'
-
-export const runtime = 'edge';
+import { db } from '@/lib/db'
 
 export async function PUT(
   request: NextRequest,
@@ -10,7 +7,6 @@ export async function PUT(
 ) {
   try {
     const { id } = await params
-    const env = getEnv(request)
     const body = await request.json()
     const { order } = body
 
@@ -24,17 +20,10 @@ export async function PUT(
       )
     }
 
-    const story = await StoryRepository.update(env, id, { orderNum: order })
-
-    if (!story) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Story not found'
-        },
-        { status: 404 }
-      )
-    }
+    const story = await db.story.update({
+      where: { id },
+      data: { order }
+    })
 
     return NextResponse.json({
       success: true,

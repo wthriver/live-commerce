@@ -191,6 +191,15 @@ export default function ProductsPage() {
   const [matrixBasePrice, setMatrixBasePrice] = useState('')
   const [matrixStock, setMatrixStock] = useState('')
 
+  useEffect(() => {
+    fetchProducts()
+    fetchCategories()
+  }, [])
+
+  useEffect(() => {
+    fetchProducts()
+  }, [categoryFilter, statusFilter])
+
   const fetchProducts = async () => {
     try {
       setLoading(true)
@@ -232,15 +241,6 @@ export default function ProductsPage() {
       console.error('Error fetching categories:', err)
     }
   }
-
-  useEffect(() => {
-    fetchProducts()
-    fetchCategories()
-  }, [])
-
-  useEffect(() => {
-    fetchProducts()
-  }, [categoryFilter, statusFilter])
 
   const handleSearch = () => {
     fetchProducts()
