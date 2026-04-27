@@ -1,0 +1,30 @@
+# robots.txt for Modern E-commerce
+# Allow all web crawlers to access the site
+
+User-agent: *
+Allow: /
+
+# Disallow admin areas
+Disallow: /admin/
+Disallow: /api/
+
+# Disallow private user areas
+Disallow: /account/
+Disallow: /cart/
+Disallow: /checkout/
+
+# Disallow search/filtering URLs (to prevent duplicate content issues)
+Disallow: /*?*
+Disallow: /*/search*
+Disallow: /*/filter*
+
+# Disallow temporary or test pages
+Disallow: /test/
+Disallow: /dev/
+Disallow: /staging/
+
+# Sitemap - Replace with your actual domain
+Sitemap: https://yourdomain.com/sitemap.xml
+
+# Crawl-delay (optional - polite crawling)
+Crawl-delay: 1
